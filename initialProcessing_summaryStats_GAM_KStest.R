@@ -47,11 +47,11 @@ library(tidyr)
 # Iterate the code below over each fish file within the group folder
 # IMPORTANT: Change 'fish15' to the appropriate fish number for each run
 
-setwd("C:/Users/james/Desktop/final_processing_check_TEST/20240116_y_NR_40dpf_tatTATsm/group_y/fish15")
+setwd("set_working_directory_here")
 
 # Read the CSV files
-csv1 <- read.csv('C:/Users/james/Desktop/final_processing_check_TEST/20240116_y_NR_40dpf_tatTATsm/group_y/fish15/coords.csv', stringsAsFactors = FALSE)
-csv2 <- read.csv('C:/Users/james/Desktop/final_processing_check_TEST/20240116_y_NR_40dpf_tatTATsm/group_y/fish15/Results.csv', stringsAsFactors = FALSE, check.names = FALSE)
+csv1 <- read.csv('your_working_directory/coords.csv', stringsAsFactors = FALSE)
+csv2 <- read.csv('your_working_directory/Results.csv', stringsAsFactors = FALSE, check.names = FALSE)
 
 # Rename the 'Label' column in csv2 to 'image' (if it needs to be retained)
 names(csv2)[names(csv2) == "Label"] <- "image"
@@ -124,7 +124,7 @@ write.csv(selected_columns, 'final_merged_csv.csv', row.names = FALSE)
 
 # Define the root directory containing all the fish folders
 # This should be the parent directory that contains fish1, fish2, fish3, etc.
-root_directory <- "C:/Users/james/Desktop/final_processing_check_TEST/20240116_y_NR_40dpf_tatTATsm/group_y" # Update this path to parent directory
+root_directory <- "your_parent_directory_here" # Update this path to parent directory
 
 # Create a new directory for modified files
 new_directory <- file.path(root_directory, "modified_csv_files")
@@ -169,13 +169,13 @@ walk(subdirectories, process_folder)
 ################################################################################
 
 # Set the path to the 'modified_csv_files' folder created in Section 3
-modified_csv_files_path <- "C:/Users/james/Desktop/final_processing_check_TEST/20240116_y_NR_40dpf_tatTATsm/group_y/modified_csv_files"
+modified_csv_files_path <- "path_to/modified_csv_files"
 
 # Identify the parent folder name
 parent_folder <- basename(dirname(modified_csv_files_path))
 
 # Create a path for the 'imagingSessionCsvs' folder
-imagingSessionCsvs_path <- file.path(dirname(dirname(modified_csv_files_path)), "imagingSessionCsvs_group_Y")
+imagingSessionCsvs_path <- file.path(dirname(dirname(modified_csv_files_path)), "imagingSessionCsvs_group_insert_your_group_here")
 
 # Create the folder if it doesn't exist
 if (!dir.exists(imagingSessionCsvs_path)) {
@@ -224,7 +224,7 @@ cat("✅ All files processed. Renamed and moved to:", imagingSessionCsvs_path, "
 ################################################################################
 
 # Set the folder path containing CSV files from Section 4
-folder_path <- "C:/Users/james/Desktop/final_processing_check_TEST/20240116_y_NR_40dpf_tatTATsm/imagingSessionCsvs_group_Y"
+folder_path <- "path_to/imagingSessionCsvs_group_your_group_here"
 output_folder <- file.path(folder_path, "withoutCoords")
 
 # ✅ Check if input folder exists
@@ -291,8 +291,8 @@ cat("\n🎉 All files processed and saved to:", output_folder, "\n")
 # Generate mean values for each fish and save in summaryStats.csv (one file per group)
 
 # Set the folder path containing CSV files without coordinates
-folder_path <- "C:/Users/james/Desktop/final_processing_check_TEST/20240116_y_NR_40dpf_tatTATsm/imagingSessionCsvs_group_Y/withoutCoords"
-summary_folder <- "C:/Users/james/Desktop/final_processing_check_TEST/20240116_y_NR_40dpf_tatTATsm/imagingSessionCsvs_group_Y/withoutCoords/summaryStats"
+folder_path <- "path_to/withoutCoords"
+summary_folder <- "path_to/withoutCoords/summaryStats"
 
 # Create a list of all CSV files in the folder
 files <- list.files(folder_path, pattern = "\\.csv$", full.names = TRUE)
@@ -344,7 +344,7 @@ print("Summary statistics generated")
 # Generate some summary plots to explore the data
 
 # Read the summary statistics data
-data <- read.csv("C:/Users/james/Desktop/final_processing_check_TEST/20240116_y_NR_40dpf_tatTATsm/imagingSessionCsvs_group_Y/withoutCoords/summaryStats/summaryStats.csv")
+data <- read.csv("path_to/withoutCoords/summaryStats/summaryStats.csv")
 
 # Reshape the data from wide to long format
 # Excluding 'fileName' and 'AreaSum' columns from reshaping
@@ -381,7 +381,7 @@ print(p)
 ################################################################################
 
 # Set working directory to the summary statistics folder
-setwd("C:/Users/james/Desktop/final_processing_check_TEST/20240116_y_NR_40dpf_tatTATsm/imagingSessionCsvs_group_Y/withoutCoords/summaryStats")
+setwd("path_to/withoutCoords/summaryStats")
 
 # Load the summaryStats CSV file
 data <- read.csv("summaryStats.csv")
@@ -475,7 +475,7 @@ train_y <- data$Feret
 # Option 2: Load the data from a summaryStats CSV file with headers
 # IMPORTANT: Change this path to your experimental group's summaryStats.csv
 # Currently using same file as control (placeholder - should be different file)
-data_test <- read.csv("C:/Users/james/Desktop/final_processing_check_TEST/20240116_y_NR_40dpf_tatTATsm/imagingSessionCsvs_group_Y/withoutCoords/summaryStats/summaryStats.csv")
+data_test <- read.csv("path_to/withoutCoords/summaryStats/summaryStats.csv")
 
 # Assign the columns to test_x and test_y using column names
 test_x <- data_test$AreaSum
