@@ -2,6 +2,9 @@
 
 This repository contains analysis pipelines for the paper available here: https://doi.org/10.7554/eLife.107327.1
 
+<img width="1294" height="705" alt="image" src="https://github.com/user-attachments/assets/497e7326-e8ef-43dc-9ba4-03297b5d8e8f" />
+
+
 ## Input images for screen
 1) two images:
       - whole animal
