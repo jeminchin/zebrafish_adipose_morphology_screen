@@ -23,7 +23,7 @@ This repository contains analysis pipelines for the paper available here: https:
 
 ## LD measurements in ImageJ
 1) open CO image in IJ
-2) run .py script to import outlines into IJ (imagej_roi_converter.py)
+2) run imagej_roi_converter.py script to import outlines into IJ
 3) run XYcoord macro (getFullXyCoords.ijm)
 4) save coords as coords.csv
 5) clear results in IJ
