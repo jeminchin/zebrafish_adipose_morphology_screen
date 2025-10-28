@@ -423,7 +423,7 @@ compare_distributions <- function(control_residuals, experimental_deviations,
 ################################################################################
 
 # Define paths (UPDATE THESE FOR YOUR DATA)
-# root_dir <- "C:/Users/james/Desktop/final_processing_check_TEST/20240116_y_NR_40dpf_tatTATsm/group_y"
+# root_dir <- ""
 # fish_dir <- file.path(root_dir, "fish15")
 
 # Step 1: Merge coordinates and measurements for a single fish
