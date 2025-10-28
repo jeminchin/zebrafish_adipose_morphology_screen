@@ -2,8 +2,7 @@
 
 This repository contains analysis pipelines for the paper available here: https://doi.org/10.7554/eLife.107327.1
 
-<img width="1294" height="705" alt="image" src="https://github.com/user-attachments/assets/497e7326-e8ef-43dc-9ba4-03297b5d8e8f" />
-
+![2025-04-15_fig3_lsat_growth_v3](https://github.com/user-attachments/assets/a6bb0fa8-5c5d-4cdb-92b3-f08571c49d63)
 
 ## Input images for screen
 1) two images:
