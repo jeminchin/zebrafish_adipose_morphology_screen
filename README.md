@@ -37,4 +37,19 @@ basic workflow for script:
 3) Generate summary statistics per fish
 4) Fit GAM model to control and experimental groups
 5) Compare experimental group to control model
-6) Perform statistical tests (Kolmogorov-Smirnov test) 
+6) Perform statistical tests (Kolmogorov-Smirnov test)
+
+## Processing #2: linear_mixed_models.R
+basic workflow for script:
+1)...
+2)...
+
+## Processing #3: BH_correction_multiple_tests.R
+basic workflow for script:
+1)...
+2)...
+
+## Processing #4: defining_strata_statistics.R
+basic workflow for script:
+1)...
+2)...
