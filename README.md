@@ -38,7 +38,3 @@ basic workflow for script:
 4) Fit GAM model to control and experimental groups
 5) Compare experimental group to control model
 6) Perform statistical tests (Kolmogorov-Smirnov test) 
-
-R
-11) merge outline measurements with coordinates and save as csv
-12) 
