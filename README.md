@@ -30,9 +30,19 @@ This repository contains analysis pipelines for the paper available here: https:
 6) select all ROIs (in ROI manager) and measure ROIs in ROI manager
 7) save measurements as Results.csv
 
-## Processing #1: check normality
+## Processing #1: initialProcessing_summaryStats_GAM_KStest.R
+basic workflow for script:
+1) Merge coordinates with measurements for each fish (coords.csv & Results.csv)
+2) Consolidate all fish data into group folders
+3) Generate summary statistics per fish
+4) Fit GAM model to control and experimental groups
+5) Compare experimental group to control model
+6) Perform statistical tests (Kolmogorov-Smirnov test) 
 
-9) run r script (process_and_check_normal_distribution) to merge coords.csv with Results.csv and clean up (output = final_merged_csv.csv), also to test for normality in both original and transformed data 
+
+
+
+1) run r script (process_and_check_normal_distribution) to merge coords.csv with Results.csv and clean up (output = final_merged_csv.csv), also to test for normality in both original and transformed data 
     input = final_merged_csv.csv
     output = summary stats from Shapiro Wilks test (text)
     output = graph showing distributions with annotation (saved to working directory)
