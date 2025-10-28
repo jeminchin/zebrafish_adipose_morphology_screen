@@ -12,14 +12,14 @@ This repository contains analysis pipelines for the paper available here: https:
 
 ## Initial processing steps in ImageJ
 1) in ImageJ, clearOutside on zoom LSAT image (CO image)
-2) perform other processing in IJ, eg filters, sharpening, denoising etc
+2) perform additional processing in IJ, eg filters, sharpening, denoising etc
 
 ## Segmentation of LDs in Cellpose
 1) open CO image in cellpose
 2) run cyto segmentation algorithm
 3) save outlines (.txt)
 4) save masks (.png)
-5) save _seg.npy file (full segmentation file?)
+5) save _seg.npy file
 
 ## LD measurements in ImageJ
 1) open CO image in IJ
