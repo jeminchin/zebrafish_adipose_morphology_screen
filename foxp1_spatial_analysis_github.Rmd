@@ -1,0 +1,1071 @@
+---
+title: "Foxp1a & Foxp1b Lipid Droplet Spatial Analysis"
+author: "Minchin Lab - University of Edinburgh"
+date: "`r Sys.Date()`"
+output: 
+  html_document:
+    toc: true
+    toc_float: true
+    toc_depth: 3
+    code_folding: show
+    theme: flatly
+    highlight: tango
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo = TRUE, 
+  warning = FALSE, 
+  message = FALSE, 
+  fig.width = 10, 
+  fig.height = 6,
+  fig.align = "center"
+)
+```
+
+# Overview
+
+This analysis examines lipid droplet (LD) diameter in **foxp1a** (ed116) and **foxp1b** (ed125) mutant zebrafish under control and high-fat diet (HFD) conditions using a paired experimental design. The same individual fish were measured under both diet conditions - initial imaging after control diet at 35dpf, followed by 14 days of a high-fat diet (5% chicken egg yolk), then imaging of responses to high-fat diet at 49dpf.
+
+## Experimental Design
+
+| Parameter | Details |
+|-----------|---------|
+| **Design** | Paired - same fish measured under both conditions |
+| **Control imaging** | 35 dpf |
+| **HFD treatment** | 14 days (5% chicken egg yolk) |
+| **HFD imaging** | 49 dpf |
+| **Spatial bins** | 200 µm strata from oldest (anterior) lipid droplets |
+| **Measurement** | Mean Feret diameter per stratum per fish |
+
+## Genotype Key
+
+| Allele | Gene | Mutation Type |
+|--------|------|---------------|
+| ed116 | foxp1a | Loss-of-function |
+| ed125 | foxp1b | Loss-of-function |
+
+# Setup
+
+```{r libraries}
+library(lme4)
+library(lmerTest)
+library(emmeans)
+library(dplyr)
+library(ggplot2)
+library(tidyr)
+library(knitr)
+```
+
+```{r config}
+# Color schemes
+colors_foxp1a <- c("mut_con" = "#99D6D6", "mut_hfd" = "#2B7A78", 
+                   "wt_con" = "#B0B0B0", "wt_hfd" = "#505050")
+colors_foxp1b <- c("mut_con" = "#e2baba", "mut_hfd" = "#CD5C5C", 
+                   "wt_con" = "#B0B0B0", "wt_hfd" = "#505050")
+
+effect_colors_foxp1a <- c("Diet (Mutant)" = "#2B7A78", "Diet (WT)" = "#505050",
+                          "Genotype (Control)" = "#99D6D6", "Genotype (HFD)" = "#B0B0B0")
+effect_colors_foxp1b <- c("Diet (Mutant)" = "#CD5C5C", "Diet (WT)" = "#505050",
+                          "Genotype (Control)" = "#e2baba", "Genotype (HFD)" = "#B0B0B0")
+```
+
+# Load Data
+
+```{r load-data}
+# Load supplementary data (should be in same directory)
+data_file <- "foxp1_ld_spatial_data_supplementary.csv"
+all_data <- read.csv(data_file)
+
+# Add simplified group column
+all_data <- all_data %>%
+  mutate(Simplified_Group = case_when(
+    Genotype == "Mutant" & Diet == "Control" ~ "mut_con",
+    Genotype == "Mutant" & Diet == "HFD" ~ "mut_hfd",
+    Genotype == "WT" & Diet == "Control" ~ "wt_con",
+    Genotype == "WT" & Diet == "HFD" ~ "wt_hfd"
+  ))
+
+# Calculate group averages
+group_averages <- all_data %>%
+  group_by(Experiment, Simplified_Group, Genotype, Diet, Stratum) %>%
+  summarise(
+    Group_Mean_Feret = mean(Mean_Feret, na.rm = TRUE),
+    Group_SEM_Feret = sd(Mean_Feret, na.rm = TRUE) / sqrt(n()),
+    N_Fish = n(),
+    .groups = 'drop'
+  )
+```
+
+## Sample Summary
+
+```{r sample-summary}
+all_data %>%
+  group_by(Experiment, Genotype, Diet) %>%
+  summarise(
+    N_Fish = n_distinct(Fish_ID), 
+    N_Strata = n(),
+    Total_LDs = sum(Count_LDs), 
+    .groups = 'drop'
+  ) %>%
+  kable(caption = "Sample sizes by experiment and group")
+```
+
+---
+
+# Foxp1b (ed125) Analysis {.tabset}
+
+```{r foxp1b-data}
+foxp1b_data <- all_data %>% filter(Experiment == "foxp1b")
+foxp1b_avg <- group_averages %>% filter(Experiment == "foxp1b")
+```
+
+## Sample Sizes
+
+```{r foxp1b-samples}
+foxp1b_data %>%
+  group_by(Genotype, Diet) %>%
+  summarise(N_Fish = n_distinct(Fish_Pair), N_Observations = n(), .groups = 'drop') %>%
+  kable(caption = "Foxp1b sample sizes by genotype and diet")
+```
+
+### Verify Pairing Structure
+
+```{r foxp1b-pairing}
+foxp1b_data %>%
+  select(Fish_ID, Genotype, Diet, Fish_Pair) %>%
+  distinct() %>%
+  arrange(Fish_Pair, Diet) %>%
+  kable(caption = "Paired structure showing same fish under both diet conditions")
+```
+
+## Trajectory Plots
+
+### Group Means with SEM
+
+```{r foxp1b-plot1, fig.height=6}
+ggplot(foxp1b_avg, aes(x = as.numeric(Stratum), y = Group_Mean_Feret, color = Simplified_Group)) +
+  geom_smooth(method = "loess", se = FALSE, linewidth = 1.2, span = 0.6) +
+  geom_point(size = 2) +
+  geom_errorbar(aes(ymin = Group_Mean_Feret - Group_SEM_Feret,
+                    ymax = Group_Mean_Feret + Group_SEM_Feret), width = 0.2, alpha = 0.5) +
+  scale_color_manual(values = colors_foxp1b,
+                     labels = c("mut_con" = "Mutant Control", "mut_hfd" = "Mutant HFD",
+                                "wt_con" = "WT Control", "wt_hfd" = "WT HFD")) +
+  theme_minimal() +
+  labs(title = "FOXP1B: Mean Feret Diameter by Stratum",
+       subtitle = "Error bars show SEM",
+       x = "Stratum (from oldest/leftmost)", y = "Mean Feret Diameter (µm)", color = "Group")
+```
+
+### Individual Fish with Group Means
+
+```{r foxp1b-plot2, fig.height=7}
+ggplot() +
+  geom_point(data = filter(foxp1b_data, as.numeric(Stratum) <= 15), 
+             aes(x = as.numeric(Stratum), y = Mean_Feret, color = Simplified_Group),
+             alpha = 0.4, size = 2) +
+  geom_smooth(data = filter(foxp1b_avg, as.numeric(Stratum) <= 15),
+              aes(x = as.numeric(Stratum), y = Group_Mean_Feret, color = Simplified_Group),
+              method = "loess", se = TRUE, linewidth = 1.5, span = 0.7, alpha = 0.15) +
+  scale_color_manual(values = colors_foxp1b,
+                     labels = c("mut_con" = "Mutant Control", "mut_hfd" = "Mutant HFD",
+                                "wt_con" = "WT Control", "wt_hfd" = "WT HFD")) +
+  scale_x_continuous(breaks = 1:15, limits = c(1, 15)) +
+  theme_classic() +
+  labs(title = "FOXP1B: Individual Fish with Group Means",
+       subtitle = "Points = individual fish per stratum, ribbons = 95% CI",
+       x = "Stratum", y = "Mean Feret Diameter (µm)", color = "Group")
+```
+
+## Statistical Analysis
+
+We fit a linear mixed effects model with Diet, Genotype, and Stratum as fixed effects (including all interactions), and Fish_Pair as a random effect to account for the paired design.
+
+**Model formula:** `Mean_Feret ~ Diet × Genotype × Stratum_numeric + (1|Fish_Pair)`
+
+```{r foxp1b-model}
+foxp1b_test <- foxp1b_data %>%
+  filter(as.numeric(Stratum) <= 15) %>%
+  mutate(Stratum_numeric = as.numeric(Stratum),
+         Stratum_factor = as.factor(Stratum))
+
+model_foxp1b <- lmer(Mean_Feret ~ Diet * Genotype * Stratum_numeric + (1|Fish_Pair), 
+                     data = foxp1b_test)
+
+summary(model_foxp1b)
+```
+
+### ANOVA Table
+
+```{r foxp1b-anova}
+anova_foxp1b <- anova(model_foxp1b)
+anova_foxp1b %>% as.data.frame() %>% kable(digits = 4, caption = "Type III ANOVA with Satterthwaite's method")
+```
+
+**Key findings:**
+
+- **Diet effect**: F = `r round(anova_foxp1b$"F value"[1], 2)`, p = `r format.pval(anova_foxp1b$"Pr(>F)"[1], digits = 3)` (highly significant)
+- **Genotype effect**: F = `r round(anova_foxp1b$"F value"[2], 2)`, p = `r format.pval(anova_foxp1b$"Pr(>F)"[2], digits = 3)` (significant)
+- **Diet × Genotype interaction**: F = `r round(anova_foxp1b$"F value"[4], 2)`, p = `r format.pval(anova_foxp1b$"Pr(>F)"[4], digits = 3)`
+- **Diet × Genotype × Stratum**: F = `r round(anova_foxp1b$"F value"[7], 2)`, p = `r format.pval(anova_foxp1b$"Pr(>F)"[7], digits = 3)`
+
+### Post-hoc: Diet Effects Within Genotype
+
+```{r foxp1b-diet-posthoc}
+emm_diet_b <- emmeans(model_foxp1b, pairwise ~ Diet | Genotype + Stratum_numeric,
+                      at = list(Stratum_numeric = 1:15))
+contrasts_b <- summary(emm_diet_b$contrasts)
+
+mut_diet_b <- contrasts_b[contrasts_b$Genotype == "Mutant", ]
+wt_diet_b <- contrasts_b[contrasts_b$Genotype == "WT", ]
+```
+
+#### Mutant: Control vs HFD
+
+```{r foxp1b-mut-diet}
+mut_diet_b %>%
+  select(Stratum_numeric, estimate, SE, p.value) %>%
+  mutate(Significant = ifelse(p.value < 0.05, "Yes", "No")) %>%
+  kable(digits = 3, caption = "Diet effect in mutants across strata")
+```
+
+```{r foxp1b-mut-summary, echo=FALSE}
+mut_sig_strata_b <- mut_diet_b$Stratum_numeric[mut_diet_b$p.value < 0.05]
+```
+
+**Summary**: HFD significantly increases droplet size in mutants at strata `r paste(mut_sig_strata_b, collapse = ", ")` (p < 0.05), but **not in later strata** -  effect is only observed in more mature regions of the adipose tissue.
+
+#### WT: Control vs HFD
+
+```{r foxp1b-wt-diet}
+wt_diet_b %>%
+  select(Stratum_numeric, estimate, SE, p.value) %>%
+  mutate(Significant = ifelse(p.value < 0.05, "Yes", "No")) %>%
+  kable(digits = 4, caption = "Diet effect in WT across strata")
+```
+
+```{r foxp1b-wt-summary, echo=FALSE}
+wt_sig_strata_b <- wt_diet_b$Stratum_numeric[wt_diet_b$p.value < 0.05]
+```
+
+**Summary**: HFD significantly increases droplet size in WT fish across **`r ifelse(length(wt_sig_strata_b) == 15, "ALL", length(wt_sig_strata_b))` strata** (`r paste(wt_sig_strata_b, collapse = ", ")`) - the effect is sustained throughout all regions of the adipose tissue.
+
+### Post-hoc: Genotype Effects Within Diet
+
+```{r foxp1b-geno-posthoc}
+emm_geno_b <- emmeans(model_foxp1b, pairwise ~ Genotype | Diet + Stratum_numeric,
+                      at = list(Stratum_numeric = 1:15))
+geno_contrasts_b <- summary(emm_geno_b$contrasts)
+
+geno_con_b <- geno_contrasts_b[geno_contrasts_b$Diet == "Control", ] %>%
+  mutate(Genotype_Effect = estimate, Significant = ifelse(p.value < 0.05, "Yes", "No"))
+geno_hfd_b <- geno_contrasts_b[geno_contrasts_b$Diet == "HFD", ] %>%
+  mutate(Genotype_Effect = estimate, Significant = ifelse(p.value < 0.05, "Yes", "No"))
+```
+
+#### Genotype Effect on Control Diet
+
+```{r foxp1b-geno-con}
+geno_con_b %>%
+  select(Stratum_numeric, Genotype_Effect, SE, p.value, Significant) %>%
+  kable(digits = 3, caption = "Genotype effect (Mutant - WT) on control diet")
+```
+
+```{r foxp1b-geno-con-summary, echo=FALSE}
+geno_con_sig_b <- geno_con_b$Stratum_numeric[geno_con_b$p.value < 0.05]
+geno_con_early_b <- mean(geno_con_b$Genotype_Effect[geno_con_b$Stratum_numeric <= 5])
+```
+
+**Summary**: Mutants have significantly larger droplets than WT on control diet across **`r length(geno_con_sig_b)` strata** (`r paste(geno_con_sig_b, collapse = ", ")`). The effect is ~`r round(geno_con_early_b, 0)` µm in early strata.
+
+#### Genotype Effect on HFD
+
+```{r foxp1b-geno-hfd}
+geno_hfd_b %>%
+  select(Stratum_numeric, Genotype_Effect, SE, p.value, Significant) %>%
+  kable(digits = 3, caption = "Genotype effect (Mutant - WT) on HFD")
+```
+
+```{r foxp1b-geno-hfd-summary, echo=FALSE}
+geno_hfd_sig_b <- geno_hfd_b$Stratum_numeric[geno_hfd_b$p.value < 0.05]
+```
+
+**Summary**: On HFD, the genotype effect **reverses** - mutants start slightly larger in early strata but WT becomes larger in late strata (`r if(length(geno_hfd_sig_b) > 0) paste("significant at strata", paste(geno_hfd_sig_b, collapse = ", ")) else "no significant differences"`). This is because WT fish mount a sustained HFD response while mutants do not.
+
+## Effect Plots
+
+### Diet Effect
+
+```{r foxp1b-diet-plot, fig.height=6}
+diet_effects_b <- rbind(
+  mut_diet_b %>% mutate(Genotype = "Mutant"),
+  wt_diet_b %>% mutate(Genotype = "WT")
+) %>% mutate(Diet_Effect = -estimate, Significant = ifelse(p.value < 0.05, "Yes", "No"))
+
+ggplot(diet_effects_b, aes(x = Stratum_numeric, y = Diet_Effect, color = Genotype)) +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "gray50") +
+  geom_line(linewidth = 1.5) +
+  geom_point(aes(shape = Significant), size = 3) +
+  geom_errorbar(aes(ymin = Diet_Effect - SE, ymax = Diet_Effect + SE), width = 0.3, alpha = 0.6) +
+  scale_color_manual(values = c("Mutant" = "#CD5C5C", "WT" = "#505050")) +
+  scale_shape_manual(values = c("No" = 1, "Yes" = 16)) +
+  scale_x_continuous(breaks = 1:15) +
+  theme_classic() +
+  labs(title = "FOXP1B: HFD Effect on Diameter",
+       subtitle = "Positive = HFD increases size; filled = p < 0.05",
+       x = "Stratum", y = "HFD Effect (µm)", color = "Genotype", shape = "Significant",
+       caption = "Error bars show standard error")
+```
+
+```{r foxp1b-diet-effect-calc, echo=FALSE}
+wt_early_effect_b <- mean(diet_effects_b$Diet_Effect[diet_effects_b$Genotype == "WT" & diet_effects_b$Stratum_numeric <= 5])
+mut_early_effect_b <- mean(diet_effects_b$Diet_Effect[diet_effects_b$Genotype == "Mutant" & diet_effects_b$Stratum_numeric <= 5])
+wt_late_effect_b <- mean(diet_effects_b$Diet_Effect[diet_effects_b$Genotype == "WT" & diet_effects_b$Stratum_numeric >= 10])
+mut_late_effect_b <- mean(diet_effects_b$Diet_Effect[diet_effects_b$Genotype == "Mutant" & diet_effects_b$Stratum_numeric >= 10])
+attenuation_b <- round((1 - mut_early_effect_b/wt_early_effect_b) * 100, 0)
+```
+
+**Interpretation**: WT fish show a strong, persistent HFD response (~`r round(wt_early_effect_b, 0)` µm in early strata, ~`r round(wt_late_effect_b, 0)` µm in late strata). Mutants show a **weaker, transient response** (~`r round(mut_early_effect_b, 0)` µm in early strata, declining to ~`r round(mut_late_effect_b, 0)` µm by late strata). This represents an **~`r attenuation_b`% attenuation** of the HFD response in mutants.
+
+### Combined Effects
+
+```{r foxp1b-combined, fig.height=7}
+diet_comb_b <- rbind(
+  mut_diet_b %>% mutate(Effect_Type = "Diet (Mutant)"),
+  wt_diet_b %>% mutate(Effect_Type = "Diet (WT)")
+) %>% mutate(Effect_Size = -estimate, Significant = ifelse(p.value < 0.05, "Yes", "No"))
+
+geno_comb_b <- rbind(
+  geno_con_b %>% mutate(Effect_Type = "Genotype (Control)"),
+  geno_hfd_b %>% mutate(Effect_Type = "Genotype (HFD)")
+) %>% select(Stratum_numeric, Effect_Type, Effect_Size = Genotype_Effect, SE, p.value, Significant)
+
+all_effects_b <- rbind(
+  diet_comb_b %>% select(Stratum_numeric, Effect_Type, Effect_Size, SE, p.value, Significant),
+  geno_comb_b
+)
+
+ggplot(all_effects_b, aes(x = Stratum_numeric, y = Effect_Size, color = Effect_Type)) +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "gray50") +
+  geom_line(linewidth = 1.2) +
+  geom_point(aes(shape = Significant), size = 2.5) +
+  scale_shape_manual(values = c("No" = 1, "Yes" = 16)) +
+  scale_color_manual(values = effect_colors_foxp1b) +
+  scale_x_continuous(breaks = 1:15) +
+  theme_classic() +
+  labs(title = "FOXP1B: All Diet and Genotype Effects",
+       subtitle = "Filled = p < 0.05",
+       x = "Stratum", y = "Effect (µm)", color = "Effect Type", shape = "Significant",
+       caption = "Filled points indicate p < 0.05")
+```
+
+**Interpretation**: This combined plot shows all four key effects:
+
+- **Diet (WT)** - Gray: Strong, persistent HFD effect throughout development
+- **Genotype (Control)** - Light pink: Baseline mutant > WT effect (constitutive hypertrophy)
+- **Diet (Mutant)** - Dark pink: Weak, transient HFD effect (early strata only)
+- **Genotype (HFD)** - Light gray: Reversal effect - mutants start larger but WT overtakes in late strata
+
+## Model Comparison {.tabset}
+
+We compare three statistical models to validate our approach:
+
+1. **Full Linear**: `Diet × Genotype × Stratum` (three-way interaction)
+2. **Simple Linear**: `Diet × Genotype + Diet × Stratum + Genotype × Stratum` (no three-way)
+3. **Categorical**: `Diet × Genotype × Stratum_factor` (stratum as factor)
+
+```{r foxp1b-model-comparison-setup}
+# Fit all three models
+model_full_b <- lmer(Mean_Feret ~ Diet * Genotype * Stratum_numeric + (1|Fish_Pair), 
+                     data = foxp1b_test)
+
+model_simple_b <- lmer(Mean_Feret ~ Diet * Genotype + Diet * Stratum_numeric + 
+                         Genotype * Stratum_numeric + (1|Fish_Pair), 
+                       data = foxp1b_test)
+
+model_cat_b <- lmer(Mean_Feret ~ Diet * Genotype * Stratum_factor + (1|Fish_Pair), 
+                    data = foxp1b_test)
+```
+
+### ANOVA Comparison
+
+```{r foxp1b-anova-comparison}
+anova_full_b <- anova(model_full_b)
+anova_simple_b <- anova(model_simple_b)
+anova_cat_b <- anova(model_cat_b)
+
+# Key interactions comparison
+comparison_anova_b <- data.frame(
+  Interaction = c("Diet × Genotype", "Diet × Stratum", "Genotype × Stratum"),
+  Full_F = c(anova_full_b["Diet:Genotype", "F value"],
+             anova_full_b["Diet:Stratum_numeric", "F value"],
+             anova_full_b["Genotype:Stratum_numeric", "F value"]),
+  Full_p = c(anova_full_b["Diet:Genotype", "Pr(>F)"],
+             anova_full_b["Diet:Stratum_numeric", "Pr(>F)"],
+             anova_full_b["Genotype:Stratum_numeric", "Pr(>F)"]),
+  Simple_F = c(anova_simple_b["Diet:Genotype", "F value"],
+               anova_simple_b["Diet:Stratum_numeric", "F value"],
+               anova_simple_b["Genotype:Stratum_numeric", "F value"]),
+  Simple_p = c(anova_simple_b["Diet:Genotype", "Pr(>F)"],
+               anova_simple_b["Diet:Stratum_numeric", "Pr(>F)"],
+               anova_simple_b["Genotype:Stratum_numeric", "Pr(>F)"])
+)
+
+comparison_anova_b %>% kable(digits = 4, caption = "ANOVA comparison across models")
+```
+
+**Three-way interaction (Full Linear only):**  
+F = `r round(anova_full_b["Diet:Genotype:Stratum_numeric", "F value"], 2)`, p = `r format.pval(anova_full_b["Diet:Genotype:Stratum_numeric", "Pr(>F)"], digits = 3)`
+
+### Model Fit Statistics
+
+```{r foxp1b-model-fit}
+model_fit_b <- data.frame(
+  Model = c("Full Linear", "Simple Linear", "Categorical"),
+  AIC = c(AIC(model_full_b), AIC(model_simple_b), AIC(model_cat_b)),
+  BIC = c(BIC(model_full_b), BIC(model_simple_b), BIC(model_cat_b))
+)
+
+model_fit_b %>% kable(digits = 1, caption = "Model fit statistics (lower is better)")
+```
+
+### Significance Patterns
+
+```{r foxp1b-sig-patterns}
+# Extract effects from each model
+emm_full_b <- emmeans(model_full_b, pairwise ~ Diet | Genotype + Stratum_numeric,
+                      at = list(Stratum_numeric = 1:15))
+emm_simple_b <- emmeans(model_simple_b, pairwise ~ Diet | Genotype + Stratum_numeric,
+                        at = list(Stratum_numeric = 1:15))
+emm_cat_b <- emmeans(model_cat_b, pairwise ~ Diet | Genotype + Stratum_factor)
+
+con_full_b <- summary(emm_full_b$contrasts)
+con_simple_b <- summary(emm_simple_b$contrasts)
+con_cat_b <- summary(emm_cat_b$contrasts)
+
+sig_patterns_b <- data.frame(
+  Model = c("Full Linear", "Simple Linear", "Categorical"),
+  WT_Diet_Sig = c(
+    sum(con_full_b$p.value[con_full_b$Genotype == "WT"] < 0.05),
+    sum(con_simple_b$p.value[con_simple_b$Genotype == "WT"] < 0.05),
+    sum(con_cat_b$p.value[con_cat_b$Genotype == "WT"] < 0.05)
+  ),
+  Mutant_Diet_Sig = c(
+    sum(con_full_b$p.value[con_full_b$Genotype == "Mutant"] < 0.05),
+    sum(con_simple_b$p.value[con_simple_b$Genotype == "Mutant"] < 0.05),
+    sum(con_cat_b$p.value[con_cat_b$Genotype == "Mutant"] < 0.05)
+  )
+)
+
+sig_patterns_b %>% kable(caption = "Number of significant strata (out of 15) for diet effect")
+```
+
+### Visual Comparison
+
+```{r foxp1b-visual-comparison, fig.height=7, fig.width=12}
+# Extract WT diet effects from all models
+wt_full_b <- con_full_b[con_full_b$Genotype == "WT", ] %>%
+  mutate(Diet_Effect = -estimate, Model = "Full Linear")
+wt_simple_b <- con_simple_b[con_simple_b$Genotype == "WT", ] %>%
+  mutate(Diet_Effect = -estimate, Model = "Simple Linear")
+wt_cat_b <- con_cat_b[con_cat_b$Genotype == "WT", ] %>%
+  mutate(Stratum_numeric = as.numeric(as.character(Stratum_factor)),
+         Diet_Effect = -estimate, Model = "Categorical")
+
+# Combine
+wt_all_models_b <- bind_rows(
+  wt_full_b %>% select(Stratum_numeric, Diet_Effect, Model),
+  wt_simple_b %>% select(Stratum_numeric, Diet_Effect, Model),
+  wt_cat_b %>% select(Stratum_numeric, Diet_Effect, Model)
+)
+
+# Raw data for reference
+raw_means_b <- foxp1b_test %>%
+  group_by(Genotype, Diet, Stratum_numeric) %>%
+  summarise(Mean_Diameter = mean(Mean_Feret, na.rm = TRUE), .groups = 'drop') %>%
+  pivot_wider(names_from = Diet, values_from = Mean_Diameter) %>%
+  mutate(Diet_Effect = HFD - Control) %>%
+  filter(!is.na(Diet_Effect))
+
+wt_raw_b <- raw_means_b %>% filter(Genotype == "WT")
+
+ggplot() +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "gray50") +
+  geom_point(data = wt_raw_b, aes(x = Stratum_numeric, y = Diet_Effect),
+             size = 3, color = "gray70", alpha = 0.6) +
+  geom_line(data = wt_all_models_b, aes(x = Stratum_numeric, y = Diet_Effect, 
+                                        color = Model, linetype = Model), linewidth = 1.2) +
+  scale_color_manual(values = c("Full Linear" = "#DC143C", 
+                                "Simple Linear" = "#FF69B4",
+                                "Categorical" = "#FFB6C1")) +
+  scale_linetype_manual(values = c("Full Linear" = "solid", 
+                                   "Simple Linear" = "dashed",
+                                   "Categorical" = "dotted")) +
+  scale_x_continuous(breaks = 1:15) +
+  theme_classic() +
+  labs(title = "FOXP1B: WT Diet Effect - Model Comparison",
+       subtitle = "Gray points = raw data means; all models converge on same pattern",
+       x = "Stratum", y = "HFD Effect (µm)")
+```
+
+### Model Comparison Summary
+
+```{r foxp1b-model-summary-text, echo=FALSE}
+three_way_p_b <- anova_full_b["Diet:Genotype:Stratum_numeric", "Pr(>F)"]
+```
+
+**Three-way interaction:** `r ifelse(three_way_p_b > 0.05, "NOT significant", "Significant")` (p = `r round(three_way_p_b, 3)`)
+
+**Conclusion**: All three models show consistent effect patterns, validating our use of the Full Linear model for the main analysis. The models converge on the same biological conclusions regardless of statistical approach.
+
+## Summary and Conclusions
+
+### Key Findings
+
+```{r foxp1b-final-summary, echo=FALSE}
+# Calculate key statistics for summary
+baseline_effect_b <- round(geno_con_early_b, 0)
+```
+
+1. **Baseline genotype effect**: foxp1b mutants have **constitutively larger lipid droplets** than WT on control diet (~`r baseline_effect_b` µm difference in early strata, significant across `r length(geno_con_sig_b)` strata)
+
+2. **Attenuated HFD response in mutants**: The foxp1b mutation reduces HFD sensitivity by approximately **`r attenuation_b`%** (`r round(mut_early_effect_b, 0)` µm vs `r round(wt_early_effect_b, 0)` µm effect in early strata)
+
+3. **Transient vs sustained effects**: 
+   - **Mutants**: HFD effect significant only in strata `r paste(mut_sig_strata_b, collapse = ", ")`, disappears in posterior tissue
+   - **WT**: HFD effect persists throughout ALL strata 1-15
+
+4. **Reversal on HFD**: Despite larger baseline size, mutants are eventually overtaken by WT on HFD in mature tissue due to their blunted dietary response
+
+5. **foxp1b role**: Required for sustained dietary lipid storage response in mature adipocytes; ed125 mutation provides  "resistance" to hypertrophy after dietary challenge
+
+### Biological Interpretation
+
+The foxp1b mutation has two distinct effects:
+
+1. **Constitutive increase** in baseline adipocyte size on control diet
+2. **Blunted response** to high-fat diet, particularly in mature adipose tissue
+
+This suggests foxp1b plays a critical role in the **adaptive metabolic response to dietary lipid excess**. The mutation may provide protection against diet-induced adipocyte hypertrophy while maintaining elevated baseline adipocyte size through an alternative mechanism.
+
+---
+
+# Foxp1a (ed116) Analysis {.tabset}
+
+```{r foxp1a-data}
+foxp1a_data <- all_data %>% filter(Experiment == "foxp1a")
+foxp1a_avg <- group_averages %>% filter(Experiment == "foxp1a")
+```
+
+## Sample Sizes
+
+```{r foxp1a-samples}
+foxp1a_data %>%
+  group_by(Genotype, Diet) %>%
+  summarise(N_Fish = n_distinct(Fish_Pair), N_Observations = n(), .groups = 'drop') %>%
+  kable(caption = "Foxp1a sample sizes by genotype and diet")
+```
+
+### Verify Pairing Structure
+
+```{r foxp1a-pairing}
+foxp1a_data %>%
+  select(Fish_ID, Genotype, Diet, Fish_Pair) %>%
+  distinct() %>%
+  arrange(Fish_Pair, Diet) %>%
+  kable(caption = "Paired structure showing same fish under both diet conditions")
+```
+
+## Trajectory Plots
+
+### Group Means with SEM
+
+```{r foxp1a-plot1, fig.height=6}
+ggplot(foxp1a_avg, aes(x = as.numeric(Stratum), y = Group_Mean_Feret, color = Simplified_Group)) +
+  geom_smooth(method = "loess", se = FALSE, linewidth = 1.2, span = 0.6) +
+  geom_point(size = 2) +
+  geom_errorbar(aes(ymin = Group_Mean_Feret - Group_SEM_Feret,
+                    ymax = Group_Mean_Feret + Group_SEM_Feret), width = 0.2, alpha = 0.5) +
+  scale_color_manual(values = colors_foxp1a,
+                     labels = c("mut_con" = "Mutant Control", "mut_hfd" = "Mutant HFD",
+                                "wt_con" = "WT Control", "wt_hfd" = "WT HFD")) +
+  theme_minimal() +
+  labs(title = "FOXP1A: Mean Feret Diameter by Stratum",
+       subtitle = "Error bars show SEM",
+       x = "Stratum (from oldest/leftmost)", y = "Mean Feret Diameter (µm)", color = "Group")
+```
+
+### Individual Fish with Group Means
+
+```{r foxp1a-plot2, fig.height=7}
+ggplot() +
+  geom_point(data = filter(foxp1a_data, as.numeric(Stratum) <= 15), 
+             aes(x = as.numeric(Stratum), y = Mean_Feret, color = Simplified_Group),
+             alpha = 0.4, size = 2) +
+  geom_smooth(data = filter(foxp1a_avg, as.numeric(Stratum) <= 15),
+              aes(x = as.numeric(Stratum), y = Group_Mean_Feret, color = Simplified_Group),
+              method = "loess", se = TRUE, linewidth = 1.5, span = 0.7, alpha = 0.15) +
+  scale_color_manual(values = colors_foxp1a,
+                     labels = c("mut_con" = "Mutant Control", "mut_hfd" = "Mutant HFD",
+                                "wt_con" = "WT Control", "wt_hfd" = "WT HFD")) +
+  scale_x_continuous(breaks = 1:15, limits = c(1, 15)) +
+  theme_classic() +
+  labs(title = "FOXP1A: Individual Fish with Group Means",
+       subtitle = "Points = individual fish per stratum, ribbons = 95% CI",
+       x = "Stratum", y = "Mean Feret Diameter (µm)", color = "Group")
+```
+
+## Statistical Analysis
+
+We fit a linear mixed effects model with Diet, Genotype, and Stratum as fixed effects (including all interactions), and Fish_Pair as a random effect to account for the paired design.
+
+**Model formula:** `Mean_Feret ~ Diet × Genotype × Stratum_numeric + (1|Fish_Pair)`
+
+```{r foxp1a-model}
+foxp1a_test <- foxp1a_data %>%
+  filter(as.numeric(Stratum) <= 15) %>%
+  mutate(Stratum_numeric = as.numeric(Stratum),
+         Stratum_factor = as.factor(Stratum))
+
+model_foxp1a <- lmer(Mean_Feret ~ Diet * Genotype * Stratum_numeric + (1|Fish_Pair), 
+                     data = foxp1a_test)
+
+summary(model_foxp1a)
+```
+
+### ANOVA Table
+
+```{r foxp1a-anova}
+anova_foxp1a <- anova(model_foxp1a)
+anova_foxp1a %>% as.data.frame() %>% kable(digits = 4, caption = "Type III ANOVA with Satterthwaite's method")
+```
+
+**Key findings:**
+
+- **Diet effect**: F = `r round(anova_foxp1a$"F value"[1], 2)`, p = `r format.pval(anova_foxp1a$"Pr(>F)"[1], digits = 3)`
+- **Genotype effect**: F = `r round(anova_foxp1a$"F value"[2], 2)`, p = `r format.pval(anova_foxp1a$"Pr(>F)"[2], digits = 3)`
+- **Diet × Genotype interaction**: F = `r round(anova_foxp1a$"F value"[4], 2)`, p = `r format.pval(anova_foxp1a$"Pr(>F)"[4], digits = 3)`
+- **Diet × Genotype × Stratum**: F = `r round(anova_foxp1a$"F value"[7], 2)`, p = `r format.pval(anova_foxp1a$"Pr(>F)"[7], digits = 3)`
+
+### Post-hoc: Diet Effects Within Genotype
+
+```{r foxp1a-diet-posthoc}
+emm_diet_a <- emmeans(model_foxp1a, pairwise ~ Diet | Genotype + Stratum_numeric,
+                      at = list(Stratum_numeric = 1:15))
+contrasts_a <- summary(emm_diet_a$contrasts)
+
+mut_diet_a <- contrasts_a[contrasts_a$Genotype == "Mutant", ]
+wt_diet_a <- contrasts_a[contrasts_a$Genotype == "WT", ]
+```
+
+#### Mutant: Control vs HFD
+
+```{r foxp1a-mut-diet}
+mut_diet_a %>%
+  select(Stratum_numeric, estimate, SE, p.value) %>%
+  mutate(Significant = ifelse(p.value < 0.05, "Yes", "No")) %>%
+  kable(digits = 3, caption = "Diet effect in mutants across strata")
+```
+
+```{r foxp1a-mut-summary, echo=FALSE}
+mut_sig_strata_a <- mut_diet_a$Stratum_numeric[mut_diet_a$p.value < 0.05]
+```
+
+**Summary**: `r if(length(mut_sig_strata_a) > 0) paste("HFD significantly affects droplet size in foxp1a mutants at strata", paste(mut_sig_strata_a, collapse = ", "), "(p < 0.05).") else "**No significant diet effect in foxp1a mutants at any stratum** - the mutation abolishes the normal spatial gradient of HFD response."` Unlike WT (and foxp1b mutants), foxp1a mutants show a **flattened, uniform response** across all strata.
+
+#### WT: Control vs HFD
+
+```{r foxp1a-wt-diet}
+wt_diet_a %>%
+  select(Stratum_numeric, estimate, SE, p.value) %>%
+  mutate(Significant = ifelse(p.value < 0.05, "Yes", "No")) %>%
+  kable(digits = 4, caption = "Diet effect in WT across strata")
+```
+
+```{r foxp1a-wt-summary, echo=FALSE}
+wt_sig_strata_a <- wt_diet_a$Stratum_numeric[wt_diet_a$p.value < 0.05]
+```
+
+**Summary**: `r if(length(wt_sig_strata_a) > 0) paste("HFD significantly affects droplet size in WT fish at strata", paste(wt_sig_strata_a, collapse = ", "), "- showing the expected spatial gradient with stronger effects in mature (early) strata.") else "No significant diet effect in WT at any stratum."` WT fish maintain normal **spatial patterning** of the HFD response.
+
+### Post-hoc: Genotype Effects Within Diet
+
+```{r foxp1a-geno-posthoc}
+emm_geno_a <- emmeans(model_foxp1a, pairwise ~ Genotype | Diet + Stratum_numeric,
+                      at = list(Stratum_numeric = 1:15))
+geno_contrasts_a <- summary(emm_geno_a$contrasts)
+
+geno_con_a <- geno_contrasts_a[geno_contrasts_a$Diet == "Control", ] %>%
+  mutate(Genotype_Effect = estimate, Significant = ifelse(p.value < 0.05, "Yes", "No"))
+geno_hfd_a <- geno_contrasts_a[geno_contrasts_a$Diet == "HFD", ] %>%
+  mutate(Genotype_Effect = estimate, Significant = ifelse(p.value < 0.05, "Yes", "No"))
+```
+
+#### Genotype Effect on Control Diet
+
+```{r foxp1a-geno-con}
+geno_con_a %>%
+  select(Stratum_numeric, Genotype_Effect, SE, p.value, Significant) %>%
+  kable(digits = 3, caption = "Genotype effect (Mutant - WT) on control diet")
+```
+
+```{r foxp1a-geno-con-summary, echo=FALSE}
+geno_con_sig_a <- geno_con_a$Stratum_numeric[geno_con_a$p.value < 0.05]
+geno_con_early_a <- mean(geno_con_a$Genotype_Effect[geno_con_a$Stratum_numeric <= 5])
+geno_con_late_a <- mean(geno_con_a$Genotype_Effect[geno_con_a$Stratum_numeric >= 10])
+```
+
+**Summary**: `r if(length(geno_con_sig_a) > 0) paste("Significant genotype effect at strata", paste(geno_con_sig_a, collapse = ", "), ". foxp1a mutants have larger adipocytes on control diet (~", round(geno_con_early_a, 0), "µm in early strata, ~", round(geno_con_late_a, 0), "µm in late strata).") else paste("No significant genotype effect on control diet, though there is a trend toward larger adipocytes in mutants (~", round(geno_con_early_a, 0), "µm in early strata).")`
+
+#### Genotype Effect on HFD
+
+```{r foxp1a-geno-hfd}
+geno_hfd_a %>%
+  select(Stratum_numeric, Genotype_Effect, SE, p.value, Significant) %>%
+  kable(digits = 3, caption = "Genotype effect (Mutant - WT) on HFD")
+```
+
+```{r foxp1a-geno-hfd-summary, echo=FALSE}
+geno_hfd_sig_a <- geno_hfd_a$Stratum_numeric[geno_hfd_a$p.value < 0.05]
+geno_hfd_early_a <- mean(geno_hfd_a$Genotype_Effect[geno_hfd_a$Stratum_numeric <= 5])
+geno_hfd_late_a <- mean(geno_hfd_a$Genotype_Effect[geno_hfd_a$Stratum_numeric >= 10])
+```
+
+**Summary**: `r if(length(geno_hfd_sig_a) > 0) paste("On HFD, significant genotype effect at strata", paste(geno_hfd_sig_a, collapse = ", "), ".") else "On HFD, no significant genotype differences."` Notably, the genotype effect is **relatively uniform across strata** (~`r round(geno_hfd_early_a, 0)` µm early, ~`r round(geno_hfd_late_a, 0)` µm late), reflecting the **loss of spatial patterning** in foxp1a mutants.
+
+## Effect Plots
+
+### Diet Effect
+
+```{r foxp1a-diet-plot, fig.height=6}
+diet_effects_a <- rbind(
+  mut_diet_a %>% mutate(Genotype = "Mutant"),
+  wt_diet_a %>% mutate(Genotype = "WT")
+) %>% mutate(Diet_Effect = -estimate, Significant = ifelse(p.value < 0.05, "Yes", "No"))
+
+ggplot(diet_effects_a, aes(x = Stratum_numeric, y = Diet_Effect, color = Genotype)) +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "gray50") +
+  geom_line(linewidth = 1.5) +
+  geom_point(aes(shape = Significant), size = 3) +
+  geom_errorbar(aes(ymin = Diet_Effect - SE, ymax = Diet_Effect + SE), width = 0.3, alpha = 0.6) +
+  scale_color_manual(values = c("Mutant" = "#2B7A78", "WT" = "#505050")) +
+  scale_shape_manual(values = c("No" = 1, "Yes" = 16)) +
+  scale_x_continuous(breaks = 1:15) +
+  theme_classic() +
+  labs(title = "FOXP1A: HFD Effect on Diameter",
+       subtitle = "Positive = HFD increases size; filled = p < 0.05",
+       x = "Stratum", y = "HFD Effect (µm)", color = "Genotype", shape = "Significant",
+       caption = "Error bars show standard error")
+```
+
+```{r foxp1a-diet-effect-calc, echo=FALSE}
+wt_early_effect_a <- mean(diet_effects_a$Diet_Effect[diet_effects_a$Genotype == "WT" & diet_effects_a$Stratum_numeric <= 5])
+wt_late_effect_a <- mean(diet_effects_a$Diet_Effect[diet_effects_a$Genotype == "WT" & diet_effects_a$Stratum_numeric >= 10])
+mut_early_effect_a <- mean(diet_effects_a$Diet_Effect[diet_effects_a$Genotype == "Mutant" & diet_effects_a$Stratum_numeric <= 5])
+mut_late_effect_a <- mean(diet_effects_a$Diet_Effect[diet_effects_a$Genotype == "Mutant" & diet_effects_a$Stratum_numeric >= 10])
+attenuation_early_a <- if(wt_early_effect_a != 0) round((1 - mut_early_effect_a/wt_early_effect_a) * 100, 0) else NA
+```
+
+**Interpretation**: 
+
+- **WT**: Shows the expected **spatial gradient** - stronger HFD response in early/mature strata (~`r round(wt_early_effect_a, 0)` µm) declining toward late/young strata (~`r round(wt_late_effect_a, 0)` µm).
+- **Mutant**: Shows a **flattened, uniform response** across all strata (~`r round(mut_early_effect_a, 0)` µm early, ~`r round(mut_late_effect_a, 0)` µm late) - the normal spatial gradient is **abolished**.
+- **Attenuation**: In early strata, the mutant HFD response is **~`r attenuation_early_a`% reduced** compared to WT (`r round(mut_early_effect_a, 0)` µm vs `r round(wt_early_effect_a, 0)` µm).
+
+### Genotype Effect on Control Diet
+
+```{r foxp1a-geno-control-plot, fig.height=6}
+ggplot(geno_con_a, aes(x = Stratum_numeric, y = Genotype_Effect)) +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "gray50") +
+  geom_line(linewidth = 1.5, color = "#99D6D6") +
+  geom_point(aes(shape = Significant, size = Significant), color = "#99D6D6") +
+  geom_errorbar(aes(ymin = Genotype_Effect - SE, ymax = Genotype_Effect + SE),
+                width = 0.3, alpha = 0.4, color = "#99D6D6") +
+  scale_shape_manual(values = c("No" = 1, "Yes" = 16)) +
+  scale_size_manual(values = c("No" = 2, "Yes" = 3)) +
+  scale_x_continuous(breaks = 1:15) +
+  theme_classic() +
+  labs(title = "FOXP1A: Genotype Effect on Control Diet",
+       subtitle = "Positive = Mutant larger than WT; filled = p < 0.05",
+       x = "Stratum", y = "Genotype Effect (µm)\n(Mutant - WT)",
+       shape = "Significant", size = "Significant",
+       caption = "Filled points indicate p < 0.05")
+```
+
+**Interpretation**: On control diet, foxp1a mutants show **constitutive lipid droplet hypertrophy** - larger lipid droplets than WT across all strata, although this is not statistically significant. Unlike foxp1b, the effect is relatively **uniform across the spatial axis**.
+
+### Combined Effects
+
+```{r foxp1a-combined, fig.height=7}
+diet_comb_a <- rbind(
+  mut_diet_a %>% mutate(Effect_Type = "Diet (Mutant)"),
+  wt_diet_a %>% mutate(Effect_Type = "Diet (WT)")
+) %>% mutate(Effect_Size = -estimate, Significant = ifelse(p.value < 0.05, "Yes", "No"))
+
+geno_comb_a <- rbind(
+  geno_con_a %>% mutate(Effect_Type = "Genotype (Control)"),
+  geno_hfd_a %>% mutate(Effect_Type = "Genotype (HFD)")
+) %>% select(Stratum_numeric, Effect_Type, Effect_Size = Genotype_Effect, SE, p.value, Significant)
+
+all_effects_a <- rbind(
+  diet_comb_a %>% select(Stratum_numeric, Effect_Type, Effect_Size, SE, p.value, Significant),
+  geno_comb_a
+)
+
+ggplot(all_effects_a, aes(x = Stratum_numeric, y = Effect_Size, color = Effect_Type)) +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "gray50") +
+  geom_line(linewidth = 1.2) +
+  geom_point(aes(shape = Significant), size = 2.5) +
+  scale_shape_manual(values = c("No" = 1, "Yes" = 16)) +
+  scale_color_manual(values = effect_colors_foxp1a) +
+  scale_x_continuous(breaks = 1:15) +
+  theme_classic() +
+  labs(title = "FOXP1A: All Diet and Genotype Effects",
+       subtitle = "Filled = p < 0.05",
+       x = "Stratum", y = "Effect (µm)", color = "Effect Type", shape = "Significant",
+       caption = "Filled points indicate p < 0.05")
+```
+
+**Interpretation**: This combined plot reveals the key foxp1a phenotype:
+
+- **Diet (WT)** - Gray: Normal spatial gradient (high early → low late)
+- **Diet (Mutant)** - Teal: **Flattened response** - spatial gradient abolished
+- **Genotype (Control)** - Light teal: Uniform baseline hypertrophy (not significant)
+- **Genotype (HFD)** - Light gray: Uniform effect, no spatial gradient
+
+The striking feature is that **all mutant effects are spatially uniform**, while WT maintains normal spatial patterning.
+
+## Model Comparison {.tabset}
+
+```{r foxp1a-model-comparison}
+# Fit all three models
+model_full_a <- lmer(Mean_Feret ~ Diet * Genotype * Stratum_numeric + (1|Fish_Pair), 
+                     data = foxp1a_test)
+
+model_simple_a <- lmer(Mean_Feret ~ Diet * Genotype + Diet * Stratum_numeric + 
+                         Genotype * Stratum_numeric + (1|Fish_Pair), 
+                       data = foxp1a_test)
+
+model_cat_a <- lmer(Mean_Feret ~ Diet * Genotype * Stratum_factor + (1|Fish_Pair), 
+                    data = foxp1a_test)
+```
+
+### Model Fit Statistics
+
+```{r foxp1a-model-fit}
+model_fit_a <- data.frame(
+  Model = c("Full Linear", "Simple Linear", "Categorical"),
+  AIC = c(AIC(model_full_a), AIC(model_simple_a), AIC(model_cat_a)),
+  BIC = c(BIC(model_full_a), BIC(model_simple_a), BIC(model_cat_a))
+)
+
+model_fit_a %>% kable(digits = 1, caption = "Model fit statistics (lower is better)")
+```
+
+### Visual Comparison
+
+```{r foxp1a-visual-comparison, fig.height=7, fig.width=12}
+# Extract WT diet effects from all models
+emm_full_a <- emmeans(model_full_a, pairwise ~ Diet | Genotype + Stratum_numeric,
+                      at = list(Stratum_numeric = 1:15))
+emm_simple_a <- emmeans(model_simple_a, pairwise ~ Diet | Genotype + Stratum_numeric,
+                        at = list(Stratum_numeric = 1:15))
+emm_cat_a <- emmeans(model_cat_a, pairwise ~ Diet | Genotype + Stratum_factor)
+
+con_full_a <- summary(emm_full_a$contrasts)
+con_simple_a <- summary(emm_simple_a$contrasts)
+con_cat_a <- summary(emm_cat_a$contrasts)
+
+wt_full_a <- con_full_a[con_full_a$Genotype == "WT", ] %>%
+  mutate(Diet_Effect = -estimate, Model = "Full Linear")
+wt_simple_a <- con_simple_a[con_simple_a$Genotype == "WT", ] %>%
+  mutate(Diet_Effect = -estimate, Model = "Simple Linear")
+wt_cat_a <- con_cat_a[con_cat_a$Genotype == "WT", ] %>%
+  mutate(Stratum_numeric = as.numeric(as.character(Stratum_factor)),
+         Diet_Effect = -estimate, Model = "Categorical")
+
+wt_all_models_a <- bind_rows(
+  wt_full_a %>% select(Stratum_numeric, Diet_Effect, Model),
+  wt_simple_a %>% select(Stratum_numeric, Diet_Effect, Model),
+  wt_cat_a %>% select(Stratum_numeric, Diet_Effect, Model)
+)
+
+# Raw data
+raw_means_a <- foxp1a_test %>%
+  group_by(Genotype, Diet, Stratum_numeric) %>%
+  summarise(Mean_Diameter = mean(Mean_Feret, na.rm = TRUE), .groups = 'drop') %>%
+  pivot_wider(names_from = Diet, values_from = Mean_Diameter) %>%
+  mutate(Diet_Effect = HFD - Control) %>%
+  filter(!is.na(Diet_Effect))
+
+wt_raw_a <- raw_means_a %>% filter(Genotype == "WT")
+
+ggplot() +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "gray50") +
+  geom_point(data = wt_raw_a, aes(x = Stratum_numeric, y = Diet_Effect),
+             size = 3, color = "gray70", alpha = 0.6) +
+  geom_line(data = wt_all_models_a, aes(x = Stratum_numeric, y = Diet_Effect, 
+                                        color = Model, linetype = Model), linewidth = 1.2) +
+  scale_color_manual(values = c("Full Linear" = "#2B7A78", 
+                                "Simple Linear" = "#48D1CC",
+                                "Categorical" = "#99D6D6")) +
+  scale_linetype_manual(values = c("Full Linear" = "solid", 
+                                   "Simple Linear" = "dashed",
+                                   "Categorical" = "dotted")) +
+  scale_x_continuous(breaks = 1:15) +
+  theme_classic() +
+  labs(title = "FOXP1A: WT Diet Effect - Model Comparison",
+       subtitle = "Gray points = raw data means; all models converge on same pattern",
+       x = "Stratum", y = "HFD Effect (µm)")
+```
+
+### Model Comparison Summary
+
+```{r foxp1a-model-summary-text, echo=FALSE}
+anova_full_a <- anova(model_full_a)
+three_way_p_a <- anova_full_a["Diet:Genotype:Stratum_numeric", "Pr(>F)"]
+```
+
+**Three-way interaction:** `r ifelse(three_way_p_a > 0.05, "NOT significant", "Significant")` (p = `r round(three_way_p_a, 3)`)
+
+All three models converge on consistent effect patterns, validating the Full Linear model approach.
+
+## Summary and Conclusions
+
+```{r foxp1a-final-summary, echo=FALSE}
+attenuation_a <- if(wt_early_effect_a != 0) round((1 - mut_early_effect_a/wt_early_effect_a) * 100, 0) else NA
+# Calculate spatial gradient loss
+wt_gradient_a <- wt_early_effect_a - wt_late_effect_a
+mut_gradient_a <- mut_early_effect_a - mut_late_effect_a
+gradient_loss_a <- if(wt_gradient_a != 0) round((1 - mut_gradient_a/wt_gradient_a) * 100, 0) else NA
+```
+
+### Key Findings
+
+1. **Loss of spatial patterning**: foxp1a mutants show a **uniform, flattened HFD response** across all strata. WT fish maintain the normal spatial gradient (~`r round(wt_gradient_a, 0)` µm difference between early and late strata), while mutants show only ~`r round(mut_gradient_a, 0)` µm difference - a **~`r gradient_loss_a`% reduction** in spatial information.
+
+2. **Attenuated HFD response**: The foxp1a mutation reduces the HFD response in early strata by **~`r attenuation_a`%** (`r round(mut_early_effect_a, 0)` µm vs `r round(wt_early_effect_a, 0)` µm in WT).
+
+3. **Baseline genotype effect**: foxp1a mutants have constitutively larger lipid droplets on control diet (~`r round(geno_con_early_a, 0)` µm difference), which was not statistically significant. Hypertrophy at baseline is much lower than foxp1b mutants.
+
+4. **Uniform vs graded**: Unlike WT (and unlike foxp1b mutants which show transient effects), foxp1a mutants show **spatially uniform** responses - the ed116 mutation disrupts the developmental/positional regulation of lipid storage.
+
+5. **Comparison with foxp1b**: 
+   - **foxp1b**: ~`r attenuation_b`% attenuation, **transient** effect (early strata only), spatial gradient **preserved**
+   - **foxp1a**: ~`r attenuation_a`% attenuation, **uniform** effect (all strata), spatial gradient **abolished**
+
+### Biological Interpretation
+
+The foxp1a mutation has distinct effects from foxp1b:
+
+1. **Constitutive hypertrophy**: Like foxp1b, baseline lipid droplet size is increased on control diet. However to a much lesser degree and not statistically significant.
+
+2. **Loss of spatial information**: Unlike foxp1b, the mutation **abolishes the normal spatial gradient** of HFD response. WT adipose tissue shows position-dependent responses (mature adipocytes respond more than young), but foxp1a mutants respond uniformly regardless of position.
+
+3. **Functional implications**: This suggests foxp1a is required for **positional identity** or **developmental timing** of metabolic responses in adipose tissue. Without foxp1a, adipocytes cannot distinguish their position/age and respond uniformly to metabolic signals.
+
+
+---
+
+# Comparison: foxp1a vs foxp1b {.tabset}
+
+```{r comparison-setup, echo=FALSE}
+# Compile comparison statistics
+comparison_table <- data.frame(
+  Metric = c(
+    "Baseline genotype effect (early strata)",
+    "HFD attenuation vs WT",
+    "Significant strata (Mutant diet effect)",
+    "Significant strata (WT diet effect)",
+    "Spatial gradient in mutants",
+    "Response pattern"
+  ),
+  foxp1a = c(
+    paste0("~", round(geno_con_early_a, 0), " µm"),
+    paste0("~", attenuation_a, "%"),
+    paste0(length(mut_sig_strata_a), "/15"),
+    paste0(length(wt_sig_strata_a), "/15"),
+    "Abolished",
+    "Uniform/flat"
+  ),
+  foxp1b = c(
+    paste0("~", round(geno_con_early_b, 0), " µm"),
+    paste0("~", attenuation_b, "%"),
+    paste0(length(mut_sig_strata_b), "/15"),
+    paste0(length(wt_sig_strata_b), "/15"),
+    "Preserved",
+    "Transient (early only)"
+  )
+)
+```
+
+## Summary Table
+
+```{r comparison-table}
+comparison_table %>%
+  kable(caption = "Comparison of foxp1a and foxp1b phenotypes")
+```
+
+## Direct Comparison Plot
+
+```{r comparison-plot, fig.height=8, fig.width=12}
+# Combine diet effects from both experiments
+diet_effects_comparison <- rbind(
+  diet_effects_a %>% mutate(Experiment = "foxp1a"),
+  diet_effects_b %>% mutate(Experiment = "foxp1b")
+)
+
+ggplot(diet_effects_comparison, aes(x = Stratum_numeric, y = Diet_Effect, 
+                                     color = interaction(Experiment, Genotype))) +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "gray50") +
+  geom_line(linewidth = 1.2) +
+  geom_point(aes(shape = Significant), size = 2.5) +
+  scale_color_manual(
+    values = c("foxp1a.Mutant" = "#2B7A78", "foxp1a.WT" = "#505050",
+               "foxp1b.Mutant" = "#CD5C5C", "foxp1b.WT" = "#808080"),
+    labels = c("foxp1a.Mutant" = "foxp1a Mutant", "foxp1a.WT" = "foxp1a WT",
+               "foxp1b.Mutant" = "foxp1b Mutant", "foxp1b.WT" = "foxp1b WT")
+  ) +
+  scale_shape_manual(values = c("No" = 1, "Yes" = 16)) +
+  scale_x_continuous(breaks = 1:15) +
+  theme_classic() +
+  labs(title = "Direct Comparison: HFD Effect in foxp1a vs foxp1b",
+       subtitle = "foxp1a shows uniform/flat response; foxp1b shows transient (early-only) response",
+       x = "Stratum (from oldest/leftmost)", y = "HFD Effect (µm)", 
+       color = "Genotype", shape = "Significant")
+```
+
+## Biological Conclusions
+
+### Shared phenotypes (foxp1a AND foxp1b)
+
+**Attenuated HFD response** - both mutations reduce the magnitude of dietary adaptation, with foxp1b mutants showing a more severe attentuation
+
+### Distinct phenotypes
+
+| Feature | foxp1a | foxp1b |
+|---------|--------|--------|
+| **Spatial pattern** | Lost - uniform response | Preserved - graded response |
+| **Temporal pattern** | All strata affected equally | Early strata only (transient) |
+| **Reversal on HFD** | No | Yes - WT overtakes mutants |
+| **Interpretation** | Required for **positional identity** | Required for **sustained response** |
+
+### Model
+
+The foxp1 paralogs seem to coordinate both the **magnitude** (foxp1b) and **spatial organization** (foxp1a) of adaptive metabolic responses in adipose tissue.
+
+---
+
+# Session Info
+
+```{r session-info}
+sessionInfo()
+```
+
+---
+
+**Data file**: `foxp1_ld_spatial_data_supplementary.csv`  
+**Analysis date**: `r Sys.Date()`  
+**R Version**: `r R.version.string`  
+**Key Packages**: lme4 `r packageVersion("lme4")`, lmerTest `r packageVersion("lmerTest")`, emmeans `r packageVersion("emmeans")`
