@@ -1,0 +1,264 @@
+################################################################################
+###  ADIPOSE MORPHOLOGY DATA PROCESSING PIPELINE                             ###
+###  Process coords.csv + Results.csv -> summaryStats.csv                    ###
+###  Processes ALL group folders in a parent directory                       ###
+###  Minchin Lab                                                             ###
+################################################################################
+
+library(dplyr)
+library(purrr)
+
+# ============================================================================
+# CONFIGURATION - EDIT THESE SETTINGS
+# ============================================================================
+
+# Path to your parent folder (containing group_Cas9, group_x, etc.)
+parent_path <- "enter_your_path_here"
+
+# Experiment tag to add to summaryStats (e.g., "expt1", "expt2", "expt3")
+experiment_tag <- "expt1"
+
+# ============================================================================
+# END CONFIGURATION
+# ============================================================================
+
+cat("\n")
+cat("================================================================================\n")
+cat("  ADIPOSE MORPHOLOGY DATA PROCESSING PIPELINE\n")
+cat("================================================================================\n")
+cat("\n")
+cat("Parent path:    ", parent_path, "\n")
+cat("Experiment tag: ", experiment_tag, "\n")
+cat("\n")
+
+# Find all group folders
+all_folders <- list.dirs(parent_path, full.names = TRUE, recursive = FALSE)
+group_folders <- all_folders[grepl("^group", basename(all_folders), ignore.case = TRUE)]
+
+if (length(group_folders) == 0) {
+  stop("No group folders found in: ", parent_path)
+}
+
+cat("Found", length(group_folders), "group folder(s):\n")
+for (gf in group_folders) {
+  cat("  -", basename(gf), "\n")
+}
+cat("\n")
+
+# ============================================================================
+# PROCESS EACH GROUP
+# ============================================================================
+
+process_group <- function(group_path, experiment_tag) {
+  
+  group_name <- basename(group_path)
+  
+  cat("\n")
+  cat("################################################################################\n")
+  cat("  Processing:", group_name, "\n")
+  cat("################################################################################\n")
+  
+  # -------------------------------------------------------------------------
+  # STEP 1: MERGE COORDS + RESULTS FOR ALL FISH
+  # -------------------------------------------------------------------------
+  cat("\nSTEP 1: Merging coords.csv and Results.csv for each fish\n")
+  cat("------------------------------------------------------------------------\n")
+  
+  # Get all fish folders
+  fish_folders <- list.dirs(group_path, full.names = TRUE, recursive = FALSE)
+  fish_folders <- fish_folders[grepl("fish", fish_folders, ignore.case = TRUE)]
+  
+  if (length(fish_folders) == 0) {
+    cat("  [WARNING] No fish folders found - skipping this group\n")
+    return(NULL)
+  }
+  
+  cat("  Found", length(fish_folders), "fish folders\n")
+  
+  for (fish_folder in fish_folders) {
+    
+    fish_name <- basename(fish_folder)
+    coords_file <- file.path(fish_folder, "coords.csv")
+    results_file <- file.path(fish_folder, "Results.csv")
+    
+    # Check if files exist
+    if (!file.exists(coords_file)) {
+      cat("  [SKIP]", fish_name, ": no coords.csv\n")
+      next
+    }
+    if (!file.exists(results_file)) {
+      cat("  [SKIP]", fish_name, ": no Results.csv\n")
+      next
+    }
+    
+    # Read the CSV files
+    csv1 <- read.csv(coords_file, stringsAsFactors = FALSE)
+    csv2 <- read.csv(results_file, stringsAsFactors = FALSE, check.names = FALSE)
+    
+    # Rename the 'Label' column in csv2 to 'image'
+    if ("Label" %in% names(csv2)) {
+      names(csv2)[names(csv2) == "Label"] <- "image"
+    }
+    
+    # Adjust the 'Label' values in csv1 by adding 1 (coords is 0-indexed)
+    csv1$Label <- csv1$Label + 1
+    
+    # Extract the numeric part from the first column in csv2
+    csv2$match_id <- as.integer(gsub("\\D", "", csv2[[1]]))
+    
+    # Merge
+    merged_csv <- merge(csv1, csv2, by.x = 'Label', by.y = 'match_id')
+    merged_csv$match_id <- NULL
+    
+    # Select columns - use what's available
+    possible_cols <- c('Label', 'X.x', 'Y.x', 'image', 'Area', 'Perim.', 'BX', 
+                       'BY', 'Width', 'Height', 'Circ.', 'Feret', 'Kurt', 
+                       '%Area', 'FeretX', 'FeretY', 'FeretAngle', 'MinFeret', 
+                       'AR', 'Round', 'Solidity', 'MinThr', 'MaxThr')
+    available_cols <- possible_cols[possible_cols %in% names(merged_csv)]
+    selected_columns <- merged_csv[, available_cols]
+    
+    # Clean up column names
+    names(selected_columns) <- gsub("\\.x|\\.y", "", names(selected_columns))
+    
+    # Write output
+    output_file <- file.path(fish_folder, "final_merged_csv.csv")
+    write.csv(selected_columns, output_file, row.names = FALSE)
+    
+    cat("  [OK]", fish_name, ":", nrow(selected_columns), "droplets\n")
+  }
+  
+  # -------------------------------------------------------------------------
+  # STEP 2: CONSOLIDATE FILES
+  # -------------------------------------------------------------------------
+  cat("\nSTEP 2: Consolidating files\n")
+  cat("------------------------------------------------------------------------\n")
+  
+  modified_directory <- file.path(group_path, "modified_csv_files")
+  if (!dir.exists(modified_directory)) dir.create(modified_directory)
+  
+  consolidate_count <- 0
+  for (fish_folder in fish_folders) {
+    file_path <- file.path(fish_folder, "final_merged_csv.csv")
+    if (file.exists(file_path)) {
+      folder_name <- basename(fish_folder)
+      new_file_name <- paste0(folder_name, "_final_merged.csv")
+      file.copy(file_path, file.path(modified_directory, new_file_name), overwrite = TRUE)
+      consolidate_count <- consolidate_count + 1
+    }
+  }
+  cat("  Consolidated", consolidate_count, "files\n")
+  
+  # -------------------------------------------------------------------------
+  # STEP 3: CREATE IMAGING SESSION FOLDER
+  # -------------------------------------------------------------------------
+  cat("\nSTEP 3: Creating imaging session folder\n")
+  cat("------------------------------------------------------------------------\n")
+  
+  imaging_session_folder <- file.path(dirname(group_path), paste0("imagingSessionCsvs_", group_name))
+  if (!dir.exists(imaging_session_folder)) dir.create(imaging_session_folder)
+  
+  csv_files <- list.files(modified_directory, pattern = "\\.csv$", full.names = TRUE)
+  for (file_path in csv_files) {
+    file_name <- basename(file_path)
+    new_file_name <- paste0(group_name, "_", file_name)
+    file.copy(file_path, file.path(imaging_session_folder, new_file_name), overwrite = TRUE)
+  }
+  cat("  Created folder with", length(csv_files), "files\n")
+  
+  # -------------------------------------------------------------------------
+  # STEP 4: REMOVE COORDINATES
+  # -------------------------------------------------------------------------
+  cat("\nSTEP 4: Removing coordinate columns\n")
+  cat("------------------------------------------------------------------------\n")
+  
+  without_coords_folder <- file.path(imaging_session_folder, "withoutCoords")
+  if (!dir.exists(without_coords_folder)) dir.create(without_coords_folder)
+  
+  files <- list.files(imaging_session_folder, pattern = "\\.csv$", full.names = TRUE)
+  
+  for (file in files) {
+    data <- read.csv(file)
+    
+    cols_to_remove <- c("X", "Y", "Label")
+    processed_data <- data[, !names(data) %in% cols_to_remove, drop = FALSE]
+    processed_data <- distinct(processed_data)
+    
+    old_name <- basename(file)
+    fish_match <- regmatches(old_name, regexpr("fish[0-9]+", old_name, ignore.case = TRUE))
+    if (length(fish_match) > 0) {
+      new_file_name <- paste0(fish_match, "_withoutCoords.csv")
+    } else {
+      new_file_name <- gsub("\\.csv$", "_withoutCoords.csv", old_name)
+    }
+    
+    write.csv(processed_data, file.path(without_coords_folder, new_file_name), row.names = FALSE)
+  }
+  cat("  Created", length(files), "files without coordinates\n")
+  
+  # -------------------------------------------------------------------------
+  # STEP 5: GENERATE SUMMARY STATISTICS
+  # -------------------------------------------------------------------------
+  cat("\nSTEP 5: Generating summary statistics\n")
+  cat("------------------------------------------------------------------------\n")
+  
+  summary_folder <- file.path(without_coords_folder, "summaryStats")
+  if (!dir.exists(summary_folder)) dir.create(summary_folder)
+  
+  files <- list.files(without_coords_folder, pattern = "\\.csv$", full.names = TRUE)
+  
+  summary_list <- list()
+  
+  for (file in files) {
+    data <- read.csv(file)
+    
+    mean_values <- sapply(data, function(x) if(is.numeric(x)) mean(x, na.rm = TRUE) else NA)
+    area_sum <- if("Area" %in% names(data)) sum(data$Area, na.rm = TRUE) else NA
+    
+    fish_id <- gsub("_withoutCoords\\.csv$", "", basename(file))
+    
+    mean_df <- data.frame(
+      fileName = fish_id,
+      experiment = experiment_tag,
+      AreaSum = area_sum,
+      t(mean_values),
+      stringsAsFactors = FALSE
+    )
+    
+    summary_list[[length(summary_list) + 1]] <- mean_df
+  }
+  
+  summary_data <- bind_rows(summary_list)
+  
+  output_file <- file.path(summary_folder, "summaryStats.csv")
+  write.csv(summary_data, output_file, row.names = FALSE)
+  
+  cat("  Generated summary for", nrow(summary_data), "fish\n")
+  cat("  Saved to:", output_file, "\n")
+  
+  return(output_file)
+}
+
+# ============================================================================
+# RUN PROCESSING ON ALL GROUPS
+# ============================================================================
+
+results <- list()
+
+for (group_folder in group_folders) {
+  result <- process_group(group_folder, experiment_tag)
+  if (!is.null(result)) {
+    results[[basename(group_folder)]] <- result
+  }
+}
+
+cat("\n")
+cat("================================================================================\n")
+cat("  ✓ ALL GROUPS COMPLETE!\n")
+cat("================================================================================\n")
+cat("\n")
+cat("Summary files created:\n")
+for (group_name in names(results)) {
+  cat("  ", group_name, ":", results[[group_name]], "\n")
+}
+cat("\n")
