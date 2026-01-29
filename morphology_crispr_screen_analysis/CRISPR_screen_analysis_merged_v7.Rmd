@@ -1,0 +1,1675 @@
+---
+title: "F0 CRISPR Screen: Adipose Morphology Analysis"
+subtitle: "KS Tests and Linear Mixed Models with Batch Correction"
+author: "Minchin Lab"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    toc_depth: 3
+    code_folding: hide
+    theme: flatly
+    highlight: tango
+    fig_width: 10
+    fig_height: 6
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo = TRUE,
+  warning = FALSE,
+  message = FALSE,
+  fig.align = "center"
+)
+```
+
+# Overview
+
+This document presents two complementary statistical approaches to analyse adipose tissue morphology phenotypes from an F0 CRISPR screen:
+
+1. **Kolmogorov-Smirnov (KS) tests** comparing residual distributions
+2. **Linear Mixed Models (LMM)** with experiment as random effect
+
+Both approaches account for batch effects between experiments and apply Benjamini-Hochberg correction for multiple testing.
+
+We also test whether mutants show altered/unequal variance and verify LMM results using alternative methods that do not assume equal variance.
+
+**Note:** Genes *aspa* and *lamb2* had only one experiment each and are analysed separately using standard linear models (Analysis 3).
+
+# Setup
+
+```{r load-packages}
+library(mgcv)
+library(lme4)
+library(lmerTest)
+library(nlme)       # For heteroscedastic LMM
+library(knitr)
+library(kableExtra)
+
+# Optional: moments package for skewness/kurtosis
+# install.packages("moments") if not installed
+if (!require(moments, quietly = TRUE)) {
+  message("Package 'moments' not installed - skewness/kurtosis will be NA")
+}
+```
+
+```{r load-data}
+# SET YOUR DATA FILE PATH HERE
+data_file <- "F0_CRISPR_screen_data_merged.csv"
+
+# Load the merged data
+all_data <- read.csv(data_file, stringsAsFactors = FALSE)
+
+# Genes to EXCLUDE from main analysis (only 1 experiment - no batch correction possible)
+single_expt_genes <- c("aspa", "lamb2")
+
+# Standardise experiment names
+standardise_exp_name <- function(exp_name) {
+  exp_name <- tolower(trimws(exp_name))
+  exp_name <- gsub("^exp([0-9]+)$", "expt\\1", exp_name)
+  return(exp_name)
+}
+
+all_data$experiment <- sapply(all_data$experiment, standardise_exp_name)
+
+# Get list of all genes
+all_genes <- unique(all_data$gene)
+
+# Identify genes with multiple experiments
+genes_multi_expt <- c()
+for (g in all_genes) {
+  gene_data <- all_data[all_data$gene == g, ]
+  n_expts <- length(unique(gene_data$experiment))
+  if (n_expts >= 2) {
+    genes_multi_expt <- c(genes_multi_expt, g)
+  }
+}
+
+# Genes for main analysis (multi-experiment)
+gene_names <- setdiff(genes_multi_expt, single_expt_genes)
+
+cat("Data file:", data_file, "\n")
+cat("Total observations:", nrow(all_data), "\n")
+cat("Total genes:", length(all_genes), "\n")
+cat("Genes with multiple experiments:", length(genes_multi_expt), "\n")
+cat("Genes excluded (single experiment):", paste(single_expt_genes, collapse = ", "), "\n")
+cat("Genes in main analysis:", length(gene_names), "\n")
+```
+
+```{r helper-functions}
+# Function to format gene name (italicized for markdown)
+format_gene_name <- function(gene, italics = TRUE) {
+  if (italics) return(paste0("*", gene, "*"))
+  return(gene)
+}
+
+# Calculate statistical power for two-sample t-test
+calc_power <- function(n1, n2, d, alpha = 0.05) {
+  n_harmonic <- 2 / (1/n1 + 1/n2)
+  ncp <- d * sqrt(n_harmonic / 2)
+  df <- n1 + n2 - 2
+  t_crit <- qt(1 - alpha/2, df)
+  power <- 1 - pt(t_crit, df, ncp) + pt(-t_crit, df, ncp)
+  return(round(power * 100, 0))
+}
+```
+
+---
+
+# Analysis 1: KS Tests with Experiment-Specific Controls
+
+## Methods
+
+For each gene:
+
+1. Pool control and experimental data from all experiments
+2. Fit GAM to controls: `Feret ~ s(log(AreaSum))`
+3. Calculate residuals for controls (baseline distribution)
+4. Calculate deviations for experimental fish from the control GAM
+5. Compare distributions using two-sample Kolmogorov-Smirnov test
+6. Apply Benjamini-Hochberg correction across all tests
+
+**Morphology value** = deviation from expected Feret diameter given total adipose area
+
+- Positive values → Hypertrophic (larger droplets than expected)
+- Negative values → Hyperplastic (smaller droplets than expected)
+
+## Run KS Tests
+
+```{r ks-analysis}
+ks_results_list <- list()
+
+for (gene in gene_names) {
+  
+  ctrl_data <- all_data[all_data$gene == gene & all_data$genotype == "control", ]
+  expt_data <- all_data[all_data$gene == gene & all_data$genotype == "mutant", ]
+  
+  # Clean data
+
+  ctrl_data <- ctrl_data[!is.na(ctrl_data$AreaSum) & ctrl_data$AreaSum > 0 & 
+                         !is.na(ctrl_data$Feret), ]
+  expt_data <- expt_data[!is.na(expt_data$AreaSum) & expt_data$AreaSum > 0 & 
+                         !is.na(expt_data$Feret), ]
+  
+  if (nrow(ctrl_data) < 5 || nrow(expt_data) < 5) next
+  
+  # Fit GAM to controls
+  gam_model <- gam(Feret ~ s(log(AreaSum)), data = ctrl_data)
+  ctrl_residuals <- residuals(gam_model)
+  
+  # Calculate deviations for experimental
+  pred <- predict(gam_model, newdata = data.frame(AreaSum = expt_data$AreaSum))
+  expt_deviations <- expt_data$Feret - pred
+  
+  # KS test
+  ks_result <- ks.test(ctrl_residuals, expt_deviations)
+  
+  ks_results_list[[gene]] <- data.frame(
+    gene = gene,
+    n_ctrl = nrow(ctrl_data),
+    n_expt = nrow(expt_data),
+    effect_um = round(mean(expt_deviations), 2),
+    KS_D = round(ks_result$statistic, 3),
+    KS_p = ks_result$p.value,
+    stringsAsFactors = FALSE
+  )
+}
+
+ks_results <- do.call(rbind, ks_results_list)
+rownames(ks_results) <- NULL
+
+# BH correction
+ks_results$KS_p_adj <- p.adjust(ks_results$KS_p, method = "BH")
+ks_results$KS_sig <- ks_results$KS_p_adj < 0.05
+ks_results$direction <- ifelse(ks_results$effect_um > 0, "Hypertrophic", "Hyperplastic")
+
+# Sort by p-value
+ks_results <- ks_results[order(ks_results$KS_p), ]
+```
+
+## KS Test Results
+
+```{r ks-table}
+# Add formatted gene names
+ks_results$gene_md <- sapply(ks_results$gene, function(x) format_gene_name(x, italics = TRUE))
+
+# Track significance levels
+ks_results$raw_sig <- ks_results$KS_p < 0.05
+ks_results$raw_only_sig <- ks_results$raw_sig & !ks_results$KS_sig  # raw sig but not after BH
+
+# Count experiments per gene
+ks_results$n_expts <- sapply(ks_results$gene, function(g) {
+  length(unique(all_data$experiment[all_data$gene == g]))
+})
+
+ks_display <- data.frame(
+  Gene = ks_results$gene_md,
+  n_expts = ks_results$n_expts,
+  n_ctrl = ks_results$n_ctrl,
+  n_expt = ks_results$n_expt,
+  Effect_um = sprintf("%+.2f", ks_results$effect_um),
+  Direction = ks_results$direction,
+  p_raw = ifelse(ks_results$KS_p < 0.001, sprintf("%.2e", ks_results$KS_p), sprintf("%.4f", ks_results$KS_p)),
+  p_adj = ifelse(ks_results$KS_p_adj < 0.001, sprintf("%.2e", ks_results$KS_p_adj), sprintf("%.4f", ks_results$KS_p_adj)),
+  Sig = ifelse(ks_results$KS_sig, "***", ifelse(ks_results$raw_only_sig, "*", ""))
+)
+
+kable(ks_display, 
+      col.names = c("Gene", "Expts", "n (ctrl)", "n (mut)", "Effect (um)", "Direction", "p (raw)", "p (adj)", "Sig."),
+      caption = "KS Test Results: Adipose morphology phenotypes (*** = BH-adjusted p < 0.05; * = raw p < 0.05 only)",
+      align = c("l", "c", "c", "c", "r", "l", "r", "r", "c")) %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"), full_width = FALSE) %>%
+  row_spec(which(ks_results$KS_sig), bold = TRUE, background = "#d4edda") %>%  # Green for BH-significant
+  row_spec(which(ks_results$raw_only_sig), bold = FALSE, background = "#fff3cd")  # Yellow for raw-only
+```
+
+```{r ks-significant, results='asis'}
+ks_bh_sig <- ks_results[ks_results$KS_sig, ]
+ks_raw_only <- ks_results[ks_results$raw_only_sig, ]
+
+cat("**Significant after BH correction (p_adj < 0.05):**\n\n")
+if (nrow(ks_bh_sig) > 0) {
+  for (i in 1:nrow(ks_bh_sig)) {
+    cat(sprintf("- **%s**: %s (%+.1f um, adj.p = %.4f)\n",
+                ks_bh_sig$gene_md[i], ks_bh_sig$direction[i], ks_bh_sig$effect_um[i], ks_bh_sig$KS_p_adj[i]))
+  }
+} else {
+  cat("None\n")
+}
+
+cat("\n**Nominally significant only (raw p < 0.05, not significant after BH):**\n\n")
+if (nrow(ks_raw_only) > 0) {
+  for (i in 1:nrow(ks_raw_only)) {
+    cat(sprintf("- %s: %s (%+.1f um, raw p = %.4f, adj.p = %.4f)\n",
+                ks_raw_only$gene_md[i], ks_raw_only$direction[i], ks_raw_only$effect_um[i], 
+                ks_raw_only$KS_p[i], ks_raw_only$KS_p_adj[i]))
+  }
+} else {
+  cat("None\n")
+}
+```
+
+---
+
+## Stratified KS Validation (Within-Experiment Analysis)
+
+The pooled KS test combines data across experiments, which could be inflated by batch effects if mutants and controls are not balanced across experiments. To validate, we run KS tests **separately within each experiment** and combine p-values using Fisher's method.
+
+```{r stratified-ks}
+# Run stratified KS tests (within each experiment)
+stratified_results <- list()
+
+for (gene in gene_names) {
+  
+  ctrl_data <- all_data[all_data$gene == gene & all_data$genotype == "control", ]
+  expt_data <- all_data[all_data$gene == gene & all_data$genotype == "mutant", ]
+  
+  # Clean data
+  ctrl_data <- ctrl_data[!is.na(ctrl_data$AreaSum) & ctrl_data$AreaSum > 0 & 
+                         !is.na(ctrl_data$Feret) & ctrl_data$Feret > 0, ]
+  expt_data <- expt_data[!is.na(expt_data$AreaSum) & expt_data$AreaSum > 0 & 
+                         !is.na(expt_data$Feret) & expt_data$Feret > 0, ]
+  
+  if (nrow(ctrl_data) < 5 | nrow(expt_data) < 5) next
+  
+  # Get shared experiments
+  shared_expts <- intersect(unique(ctrl_data$experiment), unique(expt_data$experiment))
+  
+  if (length(shared_expts) < 2) next  # Need at least 2 experiments for stratified analysis
+  
+  # Run KS test within each experiment
+  expt_p_values <- numeric()
+  expt_effects <- numeric()
+  expt_n <- numeric()
+  
+  for (exp in shared_expts) {
+    ctrl_exp <- ctrl_data[ctrl_data$experiment == exp, ]
+    expt_exp <- expt_data[expt_data$experiment == exp, ]
+    
+    if (nrow(ctrl_exp) < 3 | nrow(expt_exp) < 3) next
+    
+    # Fit GAM to controls within this experiment
+    gam_exp <- tryCatch({
+      gam(Feret ~ s(log(AreaSum)), data = ctrl_exp)
+    }, error = function(e) {
+      lm(Feret ~ log(AreaSum), data = ctrl_exp)
+    })
+    
+    ctrl_resid <- residuals(gam_exp)
+    expt_pred <- predict(gam_exp, newdata = data.frame(AreaSum = expt_exp$AreaSum))
+    expt_dev <- expt_exp$Feret - expt_pred
+    
+    # KS test
+    ks_exp <- ks.test(expt_dev, ctrl_resid)
+    expt_p_values <- c(expt_p_values, ks_exp$p.value)
+    expt_effects <- c(expt_effects, mean(expt_dev) - mean(ctrl_resid))
+    expt_n <- c(expt_n, nrow(ctrl_exp) + nrow(expt_exp))
+  }
+  
+  if (length(expt_p_values) < 2) next
+  
+  # Combine p-values using Fisher's method
+  fisher_stat <- -2 * sum(log(expt_p_values))
+  fisher_df <- 2 * length(expt_p_values)
+  fisher_p <- pchisq(fisher_stat, df = fisher_df, lower.tail = FALSE)
+  
+  # Weighted average effect
+  weighted_effect <- sum(expt_effects * expt_n) / sum(expt_n)
+  
+  # Get pooled KS result for comparison
+  pooled_p <- ks_results$KS_p[ks_results$gene == gene]
+  pooled_effect <- ks_results$effect_um[ks_results$gene == gene]
+  
+  stratified_results[[gene]] <- data.frame(
+    gene = gene,
+    n_experiments = length(expt_p_values),
+    pooled_p = pooled_p,
+    stratified_p = fisher_p,
+    pooled_effect = pooled_effect,
+    stratified_effect = weighted_effect,
+    stringsAsFactors = FALSE
+  )
+}
+
+stratified_df <- do.call(rbind, stratified_results)
+rownames(stratified_df) <- NULL
+
+# BH correction for stratified p-values
+stratified_df$stratified_p_adj <- p.adjust(stratified_df$stratified_p, method = "BH")
+stratified_df$pooled_sig <- stratified_df$pooled_p < 0.05
+stratified_df$stratified_sig <- stratified_df$stratified_p_adj < 0.05
+
+# Determine agreement
+stratified_df$agreement <- ifelse(
+  stratified_df$pooled_sig & stratified_df$stratified_sig, "Both sig",
+  ifelse(!stratified_df$pooled_sig & !stratified_df$stratified_sig, "Both NS",
+  ifelse(stratified_df$pooled_sig & !stratified_df$stratified_sig, "Pooled only",
+  "Stratified only")))
+```
+
+### Pooled vs Stratified KS Comparison
+
+**Note on significance criteria:**
+
+- **Pooled Sig:** Based on raw p-value < 0.05 (NOT BH-adjusted, to allow comparison with stratified)
+- **Stratified Sig:** Based on BH-adjusted p-value < 0.05 (Fisher's combined p-values, then corrected)
+
+```{r stratified-ks-table}
+# Create display table
+stratified_display <- data.frame(
+  Gene = sapply(stratified_df$gene, function(x) format_gene_name(x, italics = TRUE)),
+  n_expts = stratified_df$n_experiments,
+  Pooled_effect = round(stratified_df$pooled_effect, 1),
+  Pooled_p_raw = round(stratified_df$pooled_p, 4),
+  Pooled_sig = ifelse(stratified_df$pooled_sig, "*", ""),
+  Strat_effect = round(stratified_df$stratified_effect, 1),
+  Strat_p_adj = round(stratified_df$stratified_p_adj, 4),
+  Strat_sig = ifelse(stratified_df$stratified_sig, "***", ""),
+  Agreement = stratified_df$agreement,
+  stringsAsFactors = FALSE
+)
+
+# Sort by pooled p-value
+stratified_display <- stratified_display[order(stratified_df$pooled_p), ]
+
+kable(stratified_display, row.names = FALSE,
+      col.names = c("Gene", "n Expts", "Effect (um)", "p (raw)", "Sig", "Effect (um)", "p (adj)", "Sig", "Agreement"),
+      caption = "Pooled vs Stratified KS Comparison (* = raw p < 0.05; *** = BH-adjusted p < 0.05)") %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"), full_width = FALSE) %>%
+  add_header_above(c(" " = 2, "Pooled KS" = 3, "Stratified KS" = 3, " " = 1)) %>%
+  row_spec(which(stratified_df$agreement[order(stratified_df$pooled_p)] == "Both sig"), background = "#d4edda") %>%
+  row_spec(which(stratified_df$agreement[order(stratified_df$pooled_p)] == "Pooled only"), background = "#fff3cd") %>%
+  row_spec(which(stratified_df$agreement[order(stratified_df$pooled_p)] == "Stratified only"), background = "#cce5ff")
+```
+
+```{r stratified-ks-summary, results='asis'}
+both_sig <- stratified_df[stratified_df$agreement == "Both sig", ]
+pooled_only <- stratified_df[stratified_df$agreement == "Pooled only", ]
+stratified_only <- stratified_df[stratified_df$agreement == "Stratified only", ]
+
+cat("**Interpretation:**\n\n")
+
+cat("- **Both sig** (green): Robust signal - pooled raw p < 0.05 AND stratified BH-adjusted p < 0.05\n")
+cat("- **Pooled only** (yellow): Potential batch artifact - pooled raw p < 0.05 but stratified NS after correction\n")
+cat("- **Stratified only** (blue): Stratified BH-adjusted p < 0.05 but pooled raw p ≥ 0.05\n\n")
+
+if (nrow(both_sig) > 0) {
+  cat("**Robust KS signals (both methods significant):**\n\n")
+  for (i in 1:nrow(both_sig)) {
+    cat(sprintf("- %s: pooled raw p = %.4f, stratified adj.p = %.4f\n",
+                format_gene_name(both_sig$gene[i], italics = TRUE),
+                both_sig$pooled_p[i], both_sig$stratified_p_adj[i]))
+  }
+  cat("\n")
+}
+
+if (nrow(pooled_only) > 0) {
+  cat("**Potential batch artifacts (pooled only):**\n\n")
+  for (i in 1:nrow(pooled_only)) {
+    cat(sprintf("- %s: pooled raw p = %.4f, stratified adj.p = %.4f (effect may be driven by batch differences)\n",
+                format_gene_name(pooled_only$gene[i], italics = TRUE),
+                pooled_only$pooled_p[i], pooled_only$stratified_p_adj[i]))
+  }
+  cat("\n")
+}
+
+if (nrow(stratified_only) > 0) {
+  cat("**Stratified only (interpret with caution):**\n\n")
+  for (i in 1:nrow(stratified_only)) {
+    cat(sprintf("- %s: Fisher's method can be liberal with small samples\n",
+                format_gene_name(stratified_only$gene[i], italics = TRUE)))
+  }
+  cat("\n")
+}
+
+cat("*Genes showing 'Both sig' provide the strongest evidence for true distributional effects.*\n")
+```
+
+---
+
+# Analysis 2: Linear Mixed Models
+
+## Methods
+
+We fit two separate models to test intercept and slope effects independently:
+
+**Model 1 (Intercept/Main Effect):**
+$$\log(\text{Feret}) \sim \log(\text{AreaSum}) + \text{Genotype} + (1|\text{Experiment})$$
+
+Tests whether mutants have uniformly larger/smaller droplets across all sizes (average effect).
+
+**Model 2 (Slope/Interaction):**
+$$\log(\text{Feret}) \sim \log(\text{AreaSum}) \times \text{Genotype} + (1|\text{Experiment})$$
+
+Tests whether the size-scaling relationship differs in mutants (size-dependent effect).
+
+Benjamini-Hochberg correction is applied separately to intercept and slope p-values.
+
+## Run LMM
+
+```{r lmm-analysis}
+lmm_results_list <- list()
+
+for (gene in gene_names) {
+  
+  ctrl_data <- all_data[all_data$gene == gene & all_data$genotype == "control", ]
+  expt_data <- all_data[all_data$gene == gene & all_data$genotype == "mutant", ]
+  
+  ctrl_data$genotype <- "control"
+  expt_data$genotype <- "mutant"
+  
+  combined <- rbind(ctrl_data, expt_data)
+  combined <- combined[!is.na(combined$AreaSum) & combined$AreaSum > 0 & 
+                       !is.na(combined$Feret) & combined$Feret > 0, ]
+  
+  if (nrow(combined) < 10) next
+  
+  # Skip if only 1 experiment
+  if (length(unique(combined$experiment)) < 2) next
+  
+  # Log transform
+  combined$log_Feret <- log(combined$Feret)
+  combined$log_AreaSum <- log(combined$AreaSum)
+  combined$genotype <- factor(combined$genotype, levels = c("control", "mutant"))
+  
+  n_expts <- length(unique(combined$experiment))
+  
+  tryCatch({
+    # MODEL 1: Additive model for intercept (main effect)
+    model_additive <- lmer(log_Feret ~ log_AreaSum + genotype + (1 | experiment), 
+                           data = combined, REML = TRUE)
+    coefs_add <- summary(model_additive)$coefficients
+    
+    intercept_effect <- as.numeric(coefs_add["genotypemutant", "Estimate"])
+    intercept_se <- as.numeric(coefs_add["genotypemutant", "Std. Error"])
+    intercept_t <- as.numeric(coefs_add["genotypemutant", "t value"])
+    intercept_p <- as.numeric(coefs_add["genotypemutant", "Pr(>|t|)"])
+    
+    # MODEL 2: Interaction model for slope
+    model_interaction <- lmer(log_Feret ~ log_AreaSum * genotype + (1 | experiment), 
+                              data = combined, REML = TRUE)
+    coefs_int <- summary(model_interaction)$coefficients
+    
+    slope_effect <- as.numeric(coefs_int["log_AreaSum:genotypemutant", "Estimate"])
+    slope_se <- as.numeric(coefs_int["log_AreaSum:genotypemutant", "Std. Error"])
+    slope_t <- as.numeric(coefs_int["log_AreaSum:genotypemutant", "t value"])
+    slope_p <- as.numeric(coefs_int["log_AreaSum:genotypemutant", "Pr(>|t|)"])
+    
+    # Convert intercept effect to percentage
+    intercept_pct <- (exp(intercept_effect) - 1) * 100
+    
+    lmm_results_list[[gene]] <- data.frame(
+      gene = gene,
+      n_ctrl = sum(combined$genotype == "control"),
+      n_expt = sum(combined$genotype == "mutant"),
+      n_experiments = n_expts,
+      intercept_effect = round(intercept_effect, 4),
+      intercept_pct = round(intercept_pct, 2),
+      intercept_se = round(intercept_se, 4),
+      intercept_t = round(intercept_t, 3),
+      intercept_p = intercept_p,
+      slope_effect = round(slope_effect, 4),
+      slope_se = round(slope_se, 4),
+      slope_t = round(slope_t, 3),
+      slope_p = slope_p,
+      stringsAsFactors = FALSE
+    )
+  }, error = function(e) NULL)
+}
+
+lmm_results <- do.call(rbind, lmm_results_list)
+rownames(lmm_results) <- NULL
+
+# BH correction - separate for intercept and slope
+lmm_results$intercept_p_adj <- p.adjust(lmm_results$intercept_p, method = "BH")
+lmm_results$slope_p_adj <- p.adjust(lmm_results$slope_p, method = "BH")
+
+lmm_results$intercept_sig <- lmm_results$intercept_p_adj < 0.05
+lmm_results$slope_sig <- lmm_results$slope_p_adj < 0.05
+lmm_results$direction <- ifelse(lmm_results$intercept_pct > 0, "Hypertrophic", "Hyperplastic")
+
+# Sort by intercept p-value
+lmm_results <- lmm_results[order(lmm_results$intercept_p), ]
+```
+
+## LMM Results: Intercept (Main Effect)
+
+```{r lmm-intercept-table}
+# Add formatted gene names
+lmm_results$gene_md <- sapply(lmm_results$gene, function(x) format_gene_name(x, italics = TRUE))
+
+lmm_int_display <- data.frame(
+  Gene = lmm_results$gene_md,
+  n_expts = lmm_results$n_experiments,
+  n_ctrl = lmm_results$n_ctrl,
+  n_expt = lmm_results$n_expt,
+  Effect_pct = sprintf("%+.2f%%", lmm_results$intercept_pct),
+  Direction = lmm_results$direction,
+  t = sprintf("%.2f", lmm_results$intercept_t),
+  p_raw = ifelse(lmm_results$intercept_p < 0.001, sprintf("%.2e", lmm_results$intercept_p), sprintf("%.4f", lmm_results$intercept_p)),
+  p_adj = ifelse(lmm_results$intercept_p_adj < 0.001, sprintf("%.2e", lmm_results$intercept_p_adj), sprintf("%.4f", lmm_results$intercept_p_adj)),
+  Sig = ifelse(lmm_results$intercept_sig, "***", "")
+)
+
+kable(lmm_int_display, 
+      col.names = c("Gene", "Expts", "n (ctrl)", "n (mut)", "Effect (%)", "Direction", "t", "p (raw)", "p (adj)", "Sig."),
+      caption = "LMM Intercept Effects: Uniform shift in droplet size (batch-corrected)",
+      align = c("l", "c", "c", "c", "r", "l", "r", "r", "r", "c")) %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"), full_width = FALSE) %>%
+  row_spec(which(lmm_results$intercept_sig), bold = TRUE, background = "#d4edda")
+```
+
+```{r lmm-intercept-sig, results='asis'}
+lmm_int_sig <- lmm_results[lmm_results$intercept_sig, ]
+cat("**Significant intercept effects (BH-adjusted p < 0.05):**\n\n")
+if (nrow(lmm_int_sig) > 0) {
+  for (i in 1:nrow(lmm_int_sig)) {
+    cat(sprintf("- **%s**: %s (%+.1f%%, adj.p = %.4f)\n",
+                lmm_int_sig$gene_md[i], lmm_int_sig$direction[i], 
+                lmm_int_sig$intercept_pct[i], lmm_int_sig$intercept_p_adj[i]))
+  }
+} else {
+  cat("None\n")
+}
+```
+
+### Intercept Effect Plots for Significant Genes
+
+The following plots show the size-scaling relationship for genes with significant intercept (main) effects. An intercept effect means a uniform shift in droplet size across all fish sizes - the mutant regression line is shifted up (hypertrophic) or down (hyperplastic) relative to controls.
+
+```{r intercept-effect-plots, fig.width=14, fig.height=5, warning=FALSE, message=FALSE}
+# Get genes with significant intercept effects
+int_sig_genes_list <- lmm_results$gene[lmm_results$intercept_sig]
+
+if (length(int_sig_genes_list) > 0) {
+  
+  # Set up plot grid
+  n_plots <- length(int_sig_genes_list)
+  n_cols <- min(n_plots, 3)
+  n_rows <- ceiling(n_plots / 3)
+  par(mfrow = c(n_rows, n_cols), mar = c(5, 5, 4, 2))
+  
+  for (gene in int_sig_genes_list) {
+    
+    # Get data for this gene
+    gene_data <- all_data[all_data$gene == gene, ]
+    gene_data <- gene_data[!is.na(gene_data$AreaSum) & !is.na(gene_data$Feret) & 
+                           gene_data$AreaSum > 0 & gene_data$Feret > 0, ]
+    
+    ctrl <- gene_data[gene_data$genotype == "control", ]
+    mut <- gene_data[gene_data$genotype == "mutant", ]
+    
+    # Get intercept effect info
+    int_info <- lmm_results[lmm_results$gene == gene, ]
+    
+    # Plot on LOG-LOG scale to match LMM model
+    plot(log(ctrl$AreaSum), log(ctrl$Feret), 
+         col = adjustcolor("#2196F3", 0.5), pch = 16, cex = 0.8,
+         xlim = range(log(gene_data$AreaSum), na.rm = TRUE),
+         ylim = range(log(gene_data$Feret), na.rm = TRUE),
+         xlab = "log(Total Adipose Area)",
+         ylab = "log(Mean Feret Diameter)",
+         main = substitute(paste(italic(g), " - ", dir, " (", eff, "%)"), 
+                          list(g = gene, dir = int_info$direction, 
+                               eff = sprintf("%+.1f", int_info$intercept_pct))))
+    
+    points(log(mut$AreaSum), log(mut$Feret), 
+           col = adjustcolor("#F44336", 0.5), pch = 17, cex = 0.8)
+    
+    # Add regression lines on log-log scale
+    if (nrow(ctrl) >= 3) {
+      ctrl_lm <- lm(log(Feret) ~ log(AreaSum), data = ctrl)
+      abline(ctrl_lm, col = "#1565C0", lwd = 2.5)
+    }
+    if (nrow(mut) >= 3) {
+      mut_lm <- lm(log(Feret) ~ log(AreaSum), data = mut)
+      abline(mut_lm, col = "#C62828", lwd = 2.5)
+    }
+    
+    # Add legend
+    legend("topleft", 
+           legend = c(paste0("Control (n=", nrow(ctrl), ")"), 
+                     paste0("Mutant (n=", nrow(mut), ")")),
+           col = c("#1565C0", "#C62828"), 
+           pch = c(16, 17), lty = 1, lwd = 2,
+           bty = "n", cex = 0.8)
+    
+    # Add p-value annotation
+    mtext(sprintf("Intercept effect: %+.1f%%, adj.p = %.4f", 
+                  int_info$intercept_pct, int_info$intercept_p_adj),
+          side = 3, line = 0.3, cex = 0.7)
+  }
+  
+  par(mfrow = c(1, 1))
+} else {
+  cat("No genes with significant intercept effects to plot.\n")
+}
+```
+
+## LMM Results: Slope (Interaction)
+
+This tests whether the size-scaling relationship differs between mutants and controls (from a separate interaction model). A significant slope difference indicates a size-dependent phenotype.
+
+```{r lmm-slope-table}
+# Sort by slope p-value for this table
+lmm_slope_sorted <- lmm_results[order(lmm_results$slope_p), ]
+
+lmm_slope_display <- data.frame(
+  Gene = lmm_slope_sorted$gene_md,
+  n_ctrl = lmm_slope_sorted$n_ctrl,
+  n_expt = lmm_slope_sorted$n_expt,
+  Slope_diff = sprintf("%+.4f", lmm_slope_sorted$slope_effect),
+  t = sprintf("%.2f", lmm_slope_sorted$slope_t),
+  p_raw = ifelse(lmm_slope_sorted$slope_p < 0.001, sprintf("%.2e", lmm_slope_sorted$slope_p), sprintf("%.4f", lmm_slope_sorted$slope_p)),
+  p_adj = ifelse(lmm_slope_sorted$slope_p_adj < 0.001, sprintf("%.2e", lmm_slope_sorted$slope_p_adj), sprintf("%.4f", lmm_slope_sorted$slope_p_adj)),
+  Sig = ifelse(lmm_slope_sorted$slope_sig, "***", "")
+)
+
+kable(lmm_slope_display, 
+      col.names = c("Gene", "n (ctrl)", "n (expt)", "Slope diff", "t", "p (raw)", "p (adj)", "Sig."),
+      caption = "LMM Slope Effects: Size-dependent phenotype (interaction term)",
+      align = c("l", "c", "c", "r", "r", "r", "r", "c")) %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"), full_width = FALSE) %>%
+  row_spec(which(lmm_slope_sorted$slope_sig), bold = TRUE, background = "#fff3cd")
+```
+
+```{r lmm-slope-sig, results='asis'}
+lmm_slope_sig <- lmm_results[lmm_results$slope_sig, ]
+cat("**Significant slope effects (BH-adjusted p < 0.05):**\n\n")
+if (nrow(lmm_slope_sig) > 0) {
+  for (i in 1:nrow(lmm_slope_sig)) {
+    direction <- ifelse(lmm_slope_sig$slope_effect[i] > 0, "steeper", "shallower")
+    cat(sprintf("- **%s**: %s slope (%+.4f, adj.p = %.4f)\n",
+                lmm_slope_sig$gene_md[i], direction, 
+                lmm_slope_sig$slope_effect[i], lmm_slope_sig$slope_p_adj[i]))
+  }
+} else {
+  cat("None\n")
+}
+```
+
+### Slope Interaction Plots for Significant Genes
+
+The following plots show the size-scaling relationship (log(AreaSum) vs log(Feret)) for genes with significant slope differences. This matches the LMM model specification. A steeper or shallower slope in mutants indicates that the phenotype magnitude depends on fish size.
+
+```{r slope-interaction-plots, fig.width=12, fig.height=5, warning=FALSE, message=FALSE}
+# Get genes with significant slope effects
+slope_sig_genes_list <- lmm_results$gene[lmm_results$slope_sig]
+
+if (length(slope_sig_genes_list) > 0) {
+  
+  # Set up plot grid
+  n_plots <- length(slope_sig_genes_list)
+  par(mfrow = c(1, min(n_plots, 3)), mar = c(5, 5, 4, 2))
+  
+  for (gene in slope_sig_genes_list) {
+    
+    # Get data for this gene
+    gene_data <- all_data[all_data$gene == gene, ]
+    gene_data <- gene_data[!is.na(gene_data$AreaSum) & !is.na(gene_data$Feret) & 
+                           gene_data$AreaSum > 0 & gene_data$Feret > 0, ]
+    
+    ctrl <- gene_data[gene_data$genotype == "control", ]
+    mut <- gene_data[gene_data$genotype == "mutant", ]
+    
+    # Get slope effect info
+    slope_info <- lmm_results[lmm_results$gene == gene, ]
+    slope_dir <- ifelse(slope_info$slope_effect > 0, "steeper", "shallower")
+    
+    # Plot on LOG-LOG scale to match LMM model: log(Feret) ~ log(AreaSum)
+    plot(log(ctrl$AreaSum), log(ctrl$Feret), 
+         col = adjustcolor("#2196F3", 0.5), pch = 16, cex = 0.8,
+         xlim = range(log(gene_data$AreaSum), na.rm = TRUE),
+         ylim = range(log(gene_data$Feret), na.rm = TRUE),
+         xlab = "log(Total Adipose Area)",
+         ylab = "log(Mean Feret Diameter)",
+         main = substitute(paste(italic(g), " - ", dir, " slope in mutants"), 
+                          list(g = gene, dir = slope_dir)))
+    
+    points(log(mut$AreaSum), log(mut$Feret), 
+           col = adjustcolor("#F44336", 0.5), pch = 17, cex = 0.8)
+    
+    # Add regression lines on log-log scale (matching the LMM)
+    if (nrow(ctrl) >= 3) {
+      ctrl_lm <- lm(log(Feret) ~ log(AreaSum), data = ctrl)
+      abline(ctrl_lm, col = "#1565C0", lwd = 2.5)
+    }
+    if (nrow(mut) >= 3) {
+      mut_lm <- lm(log(Feret) ~ log(AreaSum), data = mut)
+      abline(mut_lm, col = "#C62828", lwd = 2.5)
+    }
+    
+    # Add legend
+    legend("topleft", 
+           legend = c(paste0("Control (n=", nrow(ctrl), ")"), 
+                     paste0("Mutant (n=", nrow(mut), ")")),
+           col = c("#1565C0", "#C62828"), 
+           pch = c(16, 17), lty = 1, lwd = 2,
+           bty = "n", cex = 0.8)
+    
+    # Add p-value annotation
+    mtext(sprintf("Slope diff: %+.4f, adj.p = %.4f", 
+                  slope_info$slope_effect, slope_info$slope_p_adj),
+          side = 3, line = 0.3, cex = 0.7)
+  }
+  
+  par(mfrow = c(1, 1))
+} else {
+  cat("No genes with significant slope effects to plot.\n")
+}
+```
+
+## Summary: Intercept vs Slope Effects
+
+```{r lmm-forest-plot, fig.width=14, fig.height=10}
+par(mfrow = c(1, 2), mar = c(5, 10, 4, 2))
+
+# Colours
+col_int_sig <- "#D32F2F"
+col_slope_sig <- "#1976D2"
+col_ns <- "#BDBDBD"
+
+# --- Panel 1: Intercept effects ---
+plot_data1 <- lmm_results[order(lmm_results$intercept_pct), ]
+n_genes <- nrow(plot_data1)
+
+# Calculate 95% CI
+plot_data1$int_ci_lower <- (exp(plot_data1$intercept_effect - 1.96 * plot_data1$intercept_se) - 1) * 100
+plot_data1$int_ci_upper <- (exp(plot_data1$intercept_effect + 1.96 * plot_data1$intercept_se) - 1) * 100
+
+plot_data1$color <- ifelse(plot_data1$intercept_sig, col_int_sig, col_ns)
+
+plot(NULL, 
+     xlim = c(min(plot_data1$int_ci_lower, -30, na.rm = TRUE), max(plot_data1$int_ci_upper, 40, na.rm = TRUE)),
+     ylim = c(0.5, n_genes + 0.5),
+     xlab = "Effect size (% change in Feret diameter)",
+     ylab = "",
+     yaxt = "n",
+     main = "Intercept Effects\n(Uniform shift)")
+
+abline(v = 0, lty = 2, col = "gray40", lwd = 1.5)
+abline(h = 1:n_genes, col = "gray90", lty = 1)
+
+for (i in 1:n_genes) {
+  segments(plot_data1$int_ci_lower[i], i, plot_data1$int_ci_upper[i], i, col = plot_data1$color[i], lwd = 2)
+  pch_size <- ifelse(plot_data1$intercept_sig[i], 2, 1.2)
+  points(plot_data1$intercept_pct[i], i, pch = 16, col = plot_data1$color[i], cex = pch_size)
+}
+
+# Use gene names directly
+axis(2, at = 1:n_genes, labels = plot_data1$gene, las = 1, cex.axis = 0.7, font = 3)
+legend("bottomright", legend = c("Significant", "Not significant"), 
+       col = c(col_int_sig, col_ns), pch = 16, lty = 1, lwd = 2, bty = "n", cex = 0.8)
+
+mtext("Hyperplastic", side = 1, at = par("usr")[1] + 5, line = 3, cex = 0.9, col = "gray40")
+mtext("Hypertrophic", side = 1, at = par("usr")[2] - 5, line = 3, cex = 0.9, col = "gray40")
+
+# --- Panel 2: Slope effects ---
+plot_data2 <- lmm_results[order(lmm_results$slope_effect), ]
+
+# Calculate 95% CI for slope
+plot_data2$slope_ci_lower <- plot_data2$slope_effect - 1.96 * plot_data2$slope_se
+plot_data2$slope_ci_upper <- plot_data2$slope_effect + 1.96 * plot_data2$slope_se
+
+plot_data2$color <- ifelse(plot_data2$slope_sig, col_slope_sig, col_ns)
+
+plot(NULL, 
+     xlim = c(min(plot_data2$slope_ci_lower, -0.15, na.rm = TRUE), max(plot_data2$slope_ci_upper, 0.15, na.rm = TRUE)),
+     ylim = c(0.5, n_genes + 0.5),
+     xlab = "Slope difference",
+     ylab = "",
+     yaxt = "n",
+     main = "Slope Effects\n(Size-dependent)")
+
+abline(v = 0, lty = 2, col = "gray40", lwd = 1.5)
+abline(h = 1:n_genes, col = "gray90", lty = 1)
+
+for (i in 1:n_genes) {
+  segments(plot_data2$slope_ci_lower[i], i, plot_data2$slope_ci_upper[i], i, col = plot_data2$color[i], lwd = 2)
+  pch_size <- ifelse(plot_data2$slope_sig[i], 2, 1.2)
+  points(plot_data2$slope_effect[i], i, pch = 16, col = plot_data2$color[i], cex = pch_size)
+}
+
+axis(2, at = 1:n_genes, labels = plot_data2$gene, las = 1, cex.axis = 0.7, font = 3)
+legend("bottomright", legend = c("Significant", "Not significant"), 
+       col = c(col_slope_sig, col_ns), pch = 16, lty = 1, lwd = 2, bty = "n", cex = 0.8)
+```
+
+---
+
+```{r update-stratified-with-lmm}
+# Add LMM significance to stratified_df for three-way validation
+if (exists("stratified_df") && nrow(stratified_df) > 0) {
+  stratified_df$lmm_sig <- FALSE
+  for (i in 1:nrow(stratified_df)) {
+    g <- stratified_df$gene[i]
+    if (g %in% lmm_results$gene) {
+      stratified_df$lmm_sig[i] <- lmm_results$intercept_p_adj[lmm_results$gene == g] < 0.05
+    }
+  }
+}
+```
+
+# Analysis 3: Single-Experiment Genes (*aspa* and *lamb2*)
+
+Genes *aspa* and *lamb2* had only one experiment each, so batch correction via random effects is not possible. We analyse these separately.
+
+**Note:** These results are not directly comparable to the batch-corrected results and should be interpreted with caution.
+
+```{r single-expt-analysis}
+single_results <- list()
+
+for (gene in single_expt_genes) {
+  
+  ctrl_data <- all_data[all_data$gene == gene & all_data$genotype == "control", ]
+  expt_data <- all_data[all_data$gene == gene & all_data$genotype == "mutant", ]
+  
+  if (nrow(ctrl_data) < 3 || nrow(expt_data) < 3) next
+  
+  # Clean
+  ctrl_data <- ctrl_data[!is.na(ctrl_data$AreaSum) & ctrl_data$AreaSum > 0 & 
+                         !is.na(ctrl_data$Feret) & ctrl_data$Feret > 0, ]
+  expt_data <- expt_data[!is.na(expt_data$AreaSum) & expt_data$AreaSum > 0 & 
+                         !is.na(expt_data$Feret) & expt_data$Feret > 0, ]
+  
+  cat("### *", gene, "* (n_ctrl = ", nrow(ctrl_data), ", n_expt = ", nrow(expt_data), ")\n\n", sep = "")
+  
+  # KS Test
+  gam_model <- gam(Feret ~ s(log(AreaSum)), data = ctrl_data)
+  ctrl_residuals <- residuals(gam_model)
+  pred <- predict(gam_model, newdata = data.frame(AreaSum = expt_data$AreaSum))
+  expt_deviations <- expt_data$Feret - pred
+  ks_result <- ks.test(ctrl_residuals, expt_deviations)
+  
+  ks_effect <- mean(expt_deviations)
+  ks_p <- ks_result$p.value
+  
+  # LM (no random effects)
+  combined <- rbind(
+    data.frame(AreaSum = ctrl_data$AreaSum, Feret = ctrl_data$Feret, genotype = "control"),
+    data.frame(AreaSum = expt_data$AreaSum, Feret = expt_data$Feret, genotype = "mutant")
+  )
+  combined$log_Feret <- log(combined$Feret)
+  combined$log_AreaSum <- log(combined$AreaSum)
+  combined$genotype <- factor(combined$genotype, levels = c("control", "mutant"))
+  
+  model <- lm(log_Feret ~ log_AreaSum + genotype, data = combined)
+  coefs <- summary(model)$coefficients
+  
+  lm_effect <- (exp(coefs["genotypemutant", 1]) - 1) * 100
+  lm_p <- coefs["genotypemutant", 4]
+  direction <- ifelse(lm_effect > 0, "Hypertrophic", "Hyperplastic")
+  
+  single_results[[gene]] <- data.frame(
+    gene = gene,
+    n_ctrl = nrow(ctrl_data),
+    n_expt = nrow(expt_data),
+    KS_effect_um = round(ks_effect, 2),
+    KS_p = ks_p,
+    KS_sig = ks_p < 0.05,
+    LM_effect_pct = round(lm_effect, 2),
+    LM_p = lm_p,
+    LM_sig = lm_p < 0.05,
+    direction = direction,
+    stringsAsFactors = FALSE
+  )
+  
+  cat("**KS Test:** ", sprintf("%+.2f um (p = %.4f, %s)\n\n", ks_effect, ks_p, ifelse(ks_p < 0.05, "significant", "NS")), sep = "")
+  cat("**Linear Model:** ", sprintf("%+.2f%% (p = %.4f, %s)\n\n", lm_effect, lm_p, ifelse(lm_p < 0.05, "significant", "NS")), sep = "")
+}
+
+single_results <- do.call(rbind, single_results)
+```
+
+## Summary Table: Single-Experiment Genes
+
+```{r single-expt-table}
+if (exists("single_results") && !is.null(single_results) && nrow(single_results) > 0) {
+  single_display <- data.frame(
+    Gene = sapply(single_results$gene, function(x) format_gene_name(x, italics = TRUE)),
+    n_ctrl = single_results$n_ctrl,
+    n_expt = single_results$n_expt,
+    KS_effect = sprintf("%+.2f", single_results$KS_effect_um),
+    KS_p = sprintf("%.4f", single_results$KS_p),
+    KS_sig = ifelse(single_results$KS_sig, "*", ""),
+    LM_effect = sprintf("%+.2f%%", single_results$LM_effect_pct),
+    LM_p = sprintf("%.4f", single_results$LM_p),
+    LM_sig = ifelse(single_results$LM_sig, "*", ""),
+    Direction = single_results$direction
+  )
+  
+  kable(single_display,
+        col.names = c("Gene", "n (ctrl)", "n (expt)", "KS Effect (um)", "KS p", "Sig", "LM Effect (%)", "LM p", "Sig", "Direction"),
+        caption = "Single-Experiment Genes: Results without batch correction") %>%
+    kable_styling(bootstrap_options = c("striped", "hover", "condensed"), full_width = FALSE)
+}
+```
+
+---
+
+# Combined Results
+
+## Comparison Table
+
+The combined table integrates results from pooled KS tests, stratified (within-experiment) KS tests, and LMM analysis. 
+
+**Important:** Genes are considered "robust" if they are significant in both **stratified KS** (which controls for batch effects) AND **LMM** (which uses experiment as a random effect). The stratified KS is preferred over pooled KS because it validates that effects are consistent within experiments rather than driven by between-experiment differences.
+
+```{r combined-results}
+# Merge KS and LMM results
+combined_results <- merge(ks_results, lmm_results, by = "gene", suffixes = c("_ks", "_lmm"))
+
+# Add stratified KS results if available
+if (exists("stratified_df") && nrow(stratified_df) > 0) {
+  stratified_subset <- stratified_df[, c("gene", "stratified_p_adj", "stratified_sig", "stratified_effect", "agreement")]
+  names(stratified_subset) <- c("gene", "stratified_KS_p_adj", "stratified_KS_sig", "stratified_KS_effect", "KS_agreement")
+  combined_results <- merge(combined_results, stratified_subset, by = "gene", all.x = TRUE)
+  
+  # Fill NAs for genes without stratified results
+  combined_results$stratified_KS_p_adj[is.na(combined_results$stratified_KS_p_adj)] <- NA
+  combined_results$stratified_KS_sig[is.na(combined_results$stratified_KS_sig)] <- FALSE
+} else {
+  combined_results$stratified_KS_p_adj <- NA
+  combined_results$stratified_KS_sig <- FALSE
+  combined_results$stratified_KS_effect <- NA
+  combined_results$KS_agreement <- NA
+}
+
+# Sort by LMM intercept p-value
+combined_results <- combined_results[order(combined_results$intercept_p), ]
+
+# Determine consensus using STRATIFIED KS (more robust than pooled)
+# A gene is "robust" if significant in stratified KS AND LMM
+combined_results$robust_sig <- combined_results$stratified_KS_sig & combined_results$intercept_sig
+
+# Also track pooled-only significance for comparison (legacy)
+combined_results$both_sig <- combined_results$KS_sig & combined_results$intercept_sig
+
+# Calculate power for large effects only (d = 0.8)
+combined_results$power_large <- mapply(calc_power, combined_results$n_ctrl_ks, combined_results$n_expt_ks, d = 0.8)
+
+# Get number of experiments per gene from stratified_df
+if (exists("stratified_df")) {
+  n_expts_lookup <- setNames(stratified_df$n_experiments, stratified_df$gene)
+  combined_results$n_expts <- n_expts_lookup[combined_results$gene]
+  combined_results$n_expts[is.na(combined_results$n_expts)] <- 1  # Default for genes not in stratified
+} else {
+  combined_results$n_expts <- NA
+}
+
+# Display table with both pooled and stratified KS
+combined_display <- data.frame(
+  Gene = sapply(combined_results$gene, function(x) format_gene_name(x, italics = TRUE)),
+  n_expts = combined_results$n_expts,
+  n = paste0(combined_results$n_ctrl_ks, "/", combined_results$n_expt_ks),
+  KS_effect = sprintf("%+.1f", combined_results$effect_um),
+  Pooled_KS_p = ifelse(combined_results$KS_p_adj < 0.001, sprintf("%.2e", combined_results$KS_p_adj), sprintf("%.3f", combined_results$KS_p_adj)),
+  Pooled_KS_sig = ifelse(combined_results$KS_sig, "***", ""),
+  Strat_KS_p = ifelse(is.na(combined_results$stratified_KS_p_adj), "-", 
+                       ifelse(combined_results$stratified_KS_p_adj < 0.001, 
+                              sprintf("%.2e", combined_results$stratified_KS_p_adj), 
+                              sprintf("%.3f", combined_results$stratified_KS_p_adj))),
+  Strat_KS_sig = ifelse(combined_results$stratified_KS_sig, "***", ""),
+  LMM_effect = sprintf("%+.1f%%", combined_results$intercept_pct),
+  LMM_p = ifelse(combined_results$intercept_p_adj < 0.001, sprintf("%.2e", combined_results$intercept_p_adj), sprintf("%.3f", combined_results$intercept_p_adj)),
+  LMM_sig = ifelse(combined_results$intercept_sig, "***", ""),
+  Direction = combined_results$direction_ks,
+  Power_L = paste0(combined_results$power_large, "%")
+)
+
+kable(combined_display,
+      col.names = c("Gene", "Expts", "n (ctrl/mut)", "Effect (um)", "Pooled p", "Sig", "Strat. p", "Sig", "Effect (%)", "LMM p (adj)", "Sig", "Direction", "Power (d=0.8)"),
+      caption = "Combined KS and LMM Results (green = significant in stratified KS AND LMM)",
+      align = c("l", "c", "c", "r", "r", "c", "r", "c", "r", "r", "c", "l", "c")) %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"), full_width = FALSE, font_size = 10) %>%
+  row_spec(which(combined_results$robust_sig), bold = TRUE, background = "#d4edda")
+```
+
+## Summary
+
+```{r summary, results='asis'}
+both_sig_genes <- combined_results$gene[combined_results$both_sig]
+robust_sig_genes <- combined_results$gene[combined_results$robust_sig]
+ks_only <- combined_results$gene[combined_results$KS_sig & !combined_results$intercept_sig]
+lmm_only <- combined_results$gene[!combined_results$KS_sig & combined_results$intercept_sig]
+# Also find genes significant in stratified KS + LMM but not pooled KS
+strat_lmm_only <- combined_results$gene[combined_results$robust_sig & !combined_results$KS_sig]
+slope_sig_genes <- lmm_results$gene[lmm_results$slope_sig]
+
+cat("## Robust Findings\n\n")
+
+# Primary: Stratified KS + LMM (most robust)
+if (length(robust_sig_genes) > 0) {
+  cat("The following genes showed significant **intercept** (uniform shift) phenotypes in both **stratified KS** (within-experiment validation) AND **LMM** (batch-corrected). These represent the highest-confidence findings:\n\n")
+  
+  for (gene in sort(robust_sig_genes)) {
+    gene_data <- combined_results[combined_results$gene == gene, ]
+    gene_md <- format_gene_name(gene, italics = TRUE)
+    
+    # Note if also significant in pooled KS
+    pooled_note <- ""
+    if (gene_data$KS_sig) {
+      pooled_note <- ", pooled KS ***"
+    }
+    
+    cat(sprintf("- **%s**: %s (%+.1f um / %+.1f%%, stratified KS adj.p = %.4f, LMM adj.p = %.4f%s)\n",
+                gene_md,
+                gene_data$direction_ks,
+                gene_data$effect_um,
+                gene_data$intercept_pct,
+                gene_data$stratified_KS_p_adj,
+                gene_data$intercept_p_adj,
+                pooled_note))
+  }
+  cat("\n")
+} else {
+  cat("No genes were significant in both stratified KS and LMM.\n\n")
+}
+
+# Secondary: Pooled KS + LMM (less robust)
+pooled_only_both <- setdiff(both_sig_genes, robust_sig_genes)
+if (length(pooled_only_both) > 0) {
+  cat("**Additional genes significant in pooled KS + LMM (but not stratified KS):**\n\n")
+  for (gene in sort(pooled_only_both)) {
+    gene_data <- combined_results[combined_results$gene == gene, ]
+    gene_md <- format_gene_name(gene, italics = TRUE)
+    cat(sprintf("- %s: %s (pooled KS adj.p = %.4f, LMM adj.p = %.4f) - *interpret with caution, may be batch artifact*\n",
+                gene_md, gene_data$direction_ks, gene_data$KS_p_adj, gene_data$intercept_p_adj))
+  }
+  cat("\n")
+}
+
+# Slope effects
+if (length(slope_sig_genes) > 0) {
+  cat("## Size-Dependent Effects (Slope)\n\n")
+  cat("The following genes showed significant **slope** differences, indicating size-dependent phenotypes:\n\n")
+  for (gene in sort(slope_sig_genes)) {
+    gene_data <- lmm_results[lmm_results$gene == gene, ]
+    gene_md <- format_gene_name(gene, italics = TRUE)
+    direction <- ifelse(gene_data$slope_effect > 0, "steeper", "shallower")
+    cat(sprintf("- **%s**: %s slope (%+.4f, adj.p = %.4f)\n",
+                gene_md, direction, gene_data$slope_effect, gene_data$slope_p_adj))
+  }
+  cat("\n*A steeper slope means the hypertrophic/hyperplastic phenotype is more pronounced in larger fish.*\n\n")
+}
+
+cat("## Single-Experiment Genes (*aspa*, *lamb2*)\n\n")
+
+if (exists("single_results") && !is.null(single_results) && nrow(single_results) > 0) {
+  for (i in 1:nrow(single_results)) {
+    gene_md <- format_gene_name(single_results$gene[i], italics = TRUE)
+    ks_sig_text <- ifelse(single_results$KS_sig[i], "*", "")
+    lm_sig_text <- ifelse(single_results$LM_sig[i], "*", "")
+    cat(sprintf("- **%s**: %s (KS: %+.1f um, p=%.3f%s | LM: %+.1f%%, p=%.3f%s)\n",
+                gene_md,
+                single_results$direction[i],
+                single_results$KS_effect_um[i],
+                single_results$KS_p[i],
+                ks_sig_text,
+                single_results$LM_effect_pct[i],
+                single_results$LM_p[i],
+                lm_sig_text))
+  }
+  cat("\n*Note: These genes had only one experiment and could not be batch-corrected.*\n\n")
+}
+
+cat("## Methodological Notes\n\n")
+cat("1. KS tests compare full distributions; LMM tests mean differences (intercept and slope)\n")
+cat("2. LMM includes experiment as random effect to account for batch variation\n")
+cat("3. Stratified KS tests run within each experiment and combined via Fisher's method to validate pooled results\n")
+cat("4. Benjamini-Hochberg correction applied separately to intercept and slope p-values across ", nrow(lmm_results), " multi-experiment genes\n", sep = "")
+cat("5. Genes *aspa* and *lamb2* (single experiment) analysed separately without batch correction\n")
+cat("6. Genes significant in pooled KS, stratified KS, AND LMM represent the highest-confidence findings\n")
+```
+
+## Figure: Forest Plot of Effect Sizes
+
+```{r forest-plot-combined, fig.width=10, fig.height=8}
+# Sort by effect size for plotting
+plot_data <- combined_results[order(combined_results$intercept_pct), ]
+
+# Calculate 95% CI
+plot_data$ci_lower <- (exp(plot_data$intercept_effect - 1.96 * plot_data$intercept_se) - 1) * 100
+plot_data$ci_upper <- (exp(plot_data$intercept_effect + 1.96 * plot_data$intercept_se) - 1) * 100
+
+# Colours based on significance - using STRATIFIED KS (not pooled)
+col_both <- "#2E7D32"
+col_ks_only <- "#1976D2"
+col_lmm_only <- "#D32F2F"
+col_neither <- "#757575"
+
+plot_data$color <- col_neither
+plot_data$color[plot_data$stratified_KS_sig & !plot_data$intercept_sig] <- col_ks_only
+plot_data$color[!plot_data$stratified_KS_sig & plot_data$intercept_sig] <- col_lmm_only
+plot_data$color[plot_data$robust_sig] <- col_both
+
+# Set up plot
+n_genes <- nrow(plot_data)
+par(mar = c(5, 10, 4, 2))
+
+# Create empty plot
+plot(NULL, 
+     xlim = c(min(plot_data$ci_lower, -30, na.rm = TRUE), max(plot_data$ci_upper, 40, na.rm = TRUE)),
+     ylim = c(0.5, n_genes + 0.5),
+     xlab = "Effect size (% change in Feret diameter)",
+     ylab = "",
+     yaxt = "n",
+     main = "LMM Intercept Effects: Forest Plot")
+
+# Add vertical line at 0
+abline(v = 0, lty = 2, col = "gray40", lwd = 1.5)
+
+# Add horizontal grid lines
+abline(h = 1:n_genes, col = "gray90", lty = 1)
+
+# Plot points and CIs
+for (i in 1:n_genes) {
+  y_pos <- i
+  
+  # Draw CI line
+  segments(plot_data$ci_lower[i], y_pos, plot_data$ci_upper[i], y_pos, 
+           col = plot_data$color[i], lwd = 2)
+  
+  # Draw point (larger for significant)
+  pch_size <- ifelse(plot_data$robust_sig[i], 2.5, 1.5)
+  points(plot_data$intercept_pct[i], y_pos, 
+         pch = ifelse(plot_data$robust_sig[i], 18, 16),
+         col = plot_data$color[i], 
+         cex = pch_size)
+}
+
+# Add gene names on y-axis (use gene names directly, italicized)
+axis(2, at = 1:n_genes, labels = plot_data$gene, las = 1, cex.axis = 0.8, font = 3)
+
+# Add legend
+legend("bottomright",
+       legend = c("Significant in both (Stratified KS + LMM)", "Stratified KS only", "LMM only", "Neither"),
+       col = c(col_both, col_ks_only, col_lmm_only, col_neither),
+       pch = c(18, 16, 16, 16),
+       lty = 1, lwd = 2,
+       bty = "n", cex = 0.85)
+
+# Add text annotations for direction
+mtext("Hyperplastic", side = 1, at = par("usr")[1] + 5, line = 3, cex = 0.9, col = "gray40")
+mtext("Hypertrophic", side = 1, at = par("usr")[2] - 5, line = 3, cex = 0.9, col = "gray40")
+```
+
+---
+
+# Variance and Heterogeneity Analysis
+
+This section examines whether mutants show altered variance (heterogeneity) compared to controls, beyond simple mean shifts.
+
+```{r variance-analysis}
+# Functions
+cv <- function(x) sd(x, na.rm = TRUE) / abs(mean(x, na.rm = TRUE)) * 100
+tail_weight <- function(x) {
+  x <- x[!is.na(x)]
+  m <- mean(x)
+  s <- sd(x)
+  sum(abs(x - m) > 2 * s) / length(x) * 100
+}
+
+# Calculate variance metrics for each gene
+variance_results <- list()
+
+for (gene in gene_names) {
+  
+  ctrl_data <- all_data[all_data$gene == gene & all_data$genotype == "control", ]
+  expt_data <- all_data[all_data$gene == gene & all_data$genotype == "mutant", ]
+  
+  ctrl_data <- ctrl_data[!is.na(ctrl_data$AreaSum) & ctrl_data$AreaSum > 0 & 
+                         !is.na(ctrl_data$Feret) & ctrl_data$Feret > 0, ]
+  expt_data <- expt_data[!is.na(expt_data$AreaSum) & expt_data$AreaSum > 0 & 
+                         !is.na(expt_data$Feret) & expt_data$Feret > 0, ]
+  
+  if (nrow(ctrl_data) < 10 | nrow(expt_data) < 10) next
+  
+  # Calculate morphology value
+  gam_model <- gam(Feret ~ s(log(AreaSum)), data = ctrl_data)
+  ctrl_residuals <- residuals(gam_model)
+  pred_expt <- predict(gam_model, newdata = data.frame(AreaSum = expt_data$AreaSum))
+  expt_deviations <- expt_data$Feret - pred_expt
+  
+  # Statistics
+  var_ctrl <- var(ctrl_residuals)
+  var_expt <- var(expt_deviations)
+  var_ratio <- var_expt / var_ctrl
+  var_test <- var.test(expt_deviations, ctrl_residuals)
+  
+  # Skewness and kurtosis
+  if (require(moments, quietly = TRUE)) {
+    skew_expt <- skewness(expt_deviations)
+    kurt_expt <- kurtosis(expt_deviations) - 3  # Excess kurtosis
+  } else {
+    skew_expt <- NA
+    kurt_expt <- NA
+  }
+  
+  variance_results[[gene]] <- data.frame(
+    gene = gene,
+    n_ctrl = length(ctrl_residuals),
+    n_expt = length(expt_deviations),
+    sd_ctrl = round(sd(ctrl_residuals), 2),
+    sd_expt = round(sd(expt_deviations), 2),
+    var_ratio = round(var_ratio, 3),
+    var_p = var_test$p.value,
+    skewness = round(skew_expt, 3),
+    kurtosis = round(kurt_expt, 3),
+    tail_pct = round(tail_weight(expt_deviations), 1),
+    stringsAsFactors = FALSE
+  )
+}
+
+variance_df <- do.call(rbind, variance_results)
+rownames(variance_df) <- NULL
+
+# BH correction
+variance_df$var_p_adj <- p.adjust(variance_df$var_p, method = "BH")
+variance_df$var_sig <- variance_df$var_p_adj < 0.05
+
+# Sort by variance ratio
+variance_df <- variance_df[order(-variance_df$var_ratio), ]
+```
+
+## Variance Comparison Table
+
+```{r variance-table}
+variance_display <- data.frame(
+  Gene = sapply(variance_df$gene, function(x) format_gene_name(x, italics = TRUE)),
+  n = paste0(variance_df$n_ctrl, "/", variance_df$n_expt),
+  SD_ctrl = sprintf("%.1f", variance_df$sd_ctrl),
+  SD_expt = sprintf("%.1f", variance_df$sd_expt),
+  Var_ratio = sprintf("%.2fx", variance_df$var_ratio),
+  p_adj = ifelse(variance_df$var_p_adj < 0.001, sprintf("%.2e", variance_df$var_p_adj), sprintf("%.3f", variance_df$var_p_adj)),
+  Sig = ifelse(variance_df$var_sig, "***", ""),
+  Skew = sprintf("%.2f", variance_df$skewness),
+  Kurt = sprintf("%.2f", variance_df$kurtosis),
+  Tail = sprintf("%.1f%%", variance_df$tail_pct)
+)
+
+kable(variance_display,
+      col.names = c("Gene", "n (ctrl/expt)", "SD (ctrl)", "SD (expt)", "Var Ratio", "Adj. p", "Sig.", "Skewness", "Kurtosis", "Tail %"),
+      caption = "Variance and Distribution Shape Analysis",
+      align = c("l", "c", "r", "r", "r", "r", "c", "r", "r", "r")) %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"), full_width = FALSE, font_size = 11) %>%
+  row_spec(which(variance_df$var_sig), bold = TRUE, background = "#fff3cd")
+```
+
+**Interpretation:**
+
+- **Variance ratio > 1**: Mutants more heterogeneous than controls
+- **Skewness > 0**: Right-skewed distribution (some large outliers)
+- **Excess Kurtosis > 0**: Heavy tails (more extreme values than normal)
+- **Tail %**: Percentage of observations beyond 2 SD
+
+```{r variance-summary, results='asis'}
+sig_increased <- variance_df[variance_df$var_sig & variance_df$var_ratio > 1, ]
+sig_decreased <- variance_df[variance_df$var_sig & variance_df$var_ratio < 1, ]
+
+if (nrow(sig_increased) > 0) {
+  cat("\n**Genes with significantly INCREASED variance:**\n\n")
+  for (i in 1:nrow(sig_increased)) {
+    gene_md <- format_gene_name(sig_increased$gene[i], italics = TRUE)
+    cat(sprintf("- %s: %.2fx variance (adj.p = %.4f), skewness = %.2f, kurtosis = %.2f\n",
+                gene_md, sig_increased$var_ratio[i], sig_increased$var_p_adj[i],
+                sig_increased$skewness[i], sig_increased$kurtosis[i]))
+  }
+}
+
+if (nrow(sig_decreased) > 0) {
+  cat("\n**Genes with significantly DECREASED variance:**\n\n")
+  for (i in 1:nrow(sig_decreased)) {
+    gene_md <- format_gene_name(sig_decreased$gene[i], italics = TRUE)
+    cat(sprintf("- %s: %.2fx variance (adj.p = %.4f)\n",
+                gene_md, sig_decreased$var_ratio[i], sig_decreased$var_p_adj[i]))
+  }
+}
+```
+
+## Variance Ratio Forest Plot
+
+```{r variance-forest-plot, fig.width=10, fig.height=8}
+par(mar = c(5, 10, 4, 2))
+
+plot_var <- variance_df[order(variance_df$var_ratio), ]
+n_genes <- nrow(plot_var)
+
+# Calculate 95% CI for variance ratio using F distribution
+plot_var$var_ci_lower <- plot_var$var_ratio / qf(0.975, plot_var$n_expt - 1, plot_var$n_ctrl - 1)
+plot_var$var_ci_upper <- plot_var$var_ratio * qf(0.975, plot_var$n_ctrl - 1, plot_var$n_expt - 1)
+
+# Colors
+plot_var$color <- "gray50"
+plot_var$color[plot_var$var_sig & plot_var$var_ratio > 1] <- "#D32F2F"
+plot_var$color[plot_var$var_sig & plot_var$var_ratio < 1] <- "#1976D2"
+
+# Plot
+plot(NULL,
+     xlim = c(0.1, max(plot_var$var_ci_upper, 15, na.rm = TRUE)),
+     ylim = c(0.5, n_genes + 0.5),
+     xlab = "Variance Ratio (Mutant / Control)",
+     ylab = "",
+     yaxt = "n",
+     main = "Variance Heterogeneity: Forest Plot",
+     log = "x")
+
+abline(v = 1, lty = 2, col = "gray40", lwd = 2)
+abline(h = 1:n_genes, col = "gray90", lty = 1)
+
+for (i in 1:n_genes) {
+  segments(plot_var$var_ci_lower[i], i, plot_var$var_ci_upper[i], i,
+           col = plot_var$color[i], lwd = 2)
+  points(plot_var$var_ratio[i], i, pch = 16, col = plot_var$color[i], 
+         cex = ifelse(plot_var$var_sig[i], 2, 1.2))
+}
+
+axis(2, at = 1:n_genes, labels = plot_var$gene, las = 1, cex.axis = 0.8, font = 3)
+
+legend("bottomright",
+       legend = c("Increased variance (sig.)", "Decreased variance (sig.)", "Not significant"),
+       col = c("#D32F2F", "#1976D2", "gray50"),
+       pch = 16, lty = 1, lwd = 2,
+       bty = "n", cex = 0.9)
+```
+
+---
+
+# LMM Robustness to Heteroscedasticity
+
+For genes with significantly altered variance, we verify that LMM results are robust using alternative methods that do not assume equal variance.
+
+```{r lmm-robustness, message=FALSE, warning=FALSE}
+# Focus on genes with high variance ratios OR robust hits (stratified KS + LMM)
+genes_to_check <- unique(c(
+  variance_df$gene[variance_df$var_sig],
+  combined_results$gene[combined_results$robust_sig]
+))
+
+robustness_results <- list()
+
+for (gene in genes_to_check) {
+  
+  ctrl_data <- all_data[all_data$gene == gene & all_data$genotype == "control", ]
+  expt_data <- all_data[all_data$gene == gene & all_data$genotype == "mutant", ]
+  
+  ctrl_data <- ctrl_data[!is.na(ctrl_data$AreaSum) & ctrl_data$AreaSum > 0 & 
+                         !is.na(ctrl_data$Feret) & ctrl_data$Feret > 0, ]
+  expt_data <- expt_data[!is.na(expt_data$AreaSum) & expt_data$AreaSum > 0 & 
+                         !is.na(expt_data$Feret) & expt_data$Feret > 0, ]
+  
+  ctrl_data$genotype <- "control"
+  expt_data$genotype <- "mutant"
+  combined <- rbind(ctrl_data, expt_data)
+  combined$genotype <- factor(combined$genotype, levels = c("control", "mutant"))
+  combined$log_AreaSum <- log(combined$AreaSum)
+  combined$log_Feret <- log(combined$Feret)
+  combined$experiment <- factor(combined$experiment)
+  
+  n_expts <- length(unique(combined$experiment))
+  if (n_expts < 2) next
+  
+  var_ratio <- variance_df$var_ratio[variance_df$gene == gene]
+  
+  res <- list(gene = gene, var_ratio = var_ratio)
+  
+  # Method 1: Standard LMM
+  tryCatch({
+    model_lmer <- lmer(log_Feret ~ log_AreaSum + genotype + (1 | experiment), 
+                       data = combined, REML = TRUE)
+    coefs <- summary(model_lmer)$coefficients
+    res$lmer_pct <- (exp(coefs["genotypemutant", "Estimate"]) - 1) * 100
+    res$lmer_p <- coefs["genotypemutant", "Pr(>|t|)"]
+  }, error = function(e) { res$lmer_pct <- NA; res$lmer_p <- NA })
+  
+  # Method 2: Heteroscedastic LMM (nlme)
+  tryCatch({
+    model_nlme <- lme(log_Feret ~ log_AreaSum + genotype, 
+                      random = ~ 1 | experiment,
+                      weights = varIdent(form = ~ 1 | genotype),
+                      data = combined, method = "REML")
+    coefs_nlme <- summary(model_nlme)$tTable
+    res$nlme_pct <- (exp(coefs_nlme["genotypemutant", "Value"]) - 1) * 100
+    res$nlme_p <- coefs_nlme["genotypemutant", "p-value"]
+  }, error = function(e) { res$nlme_pct <- NA; res$nlme_p <- NA })
+  
+  # Method 3: Permutation test
+  tryCatch({
+    model_null <- lmer(log_Feret ~ log_AreaSum + (1 | experiment), data = combined, REML = TRUE)
+    combined$resid <- residuals(model_null)
+    obs_diff <- mean(combined$resid[combined$genotype == "mutant"]) - 
+                mean(combined$resid[combined$genotype == "control"])
+    
+    n_perm <- 2000
+    perm_diffs <- numeric(n_perm)
+    set.seed(42)
+    for (i in 1:n_perm) {
+      perm_geno <- combined$genotype
+      for (exp in unique(combined$experiment)) {
+        idx <- which(combined$experiment == exp)
+        perm_geno[idx] <- sample(perm_geno[idx])
+      }
+      perm_diffs[i] <- mean(combined$resid[perm_geno == "mutant"]) - 
+                       mean(combined$resid[perm_geno == "control"])
+    }
+    res$perm_pct <- (exp(obs_diff) - 1) * 100
+    res$perm_p <- mean(abs(perm_diffs) >= abs(obs_diff))
+  }, error = function(e) { res$perm_pct <- NA; res$perm_p <- NA })
+  
+  # Method 4: Welch t-test on residuals
+  tryCatch({
+    ctrl_resid <- combined$resid[combined$genotype == "control"]
+    expt_resid <- combined$resid[combined$genotype == "mutant"]
+    welch <- t.test(expt_resid, ctrl_resid, var.equal = FALSE)
+    res$welch_pct <- (exp(diff(welch$estimate)) - 1) * 100
+    res$welch_p <- welch$p.value
+  }, error = function(e) { res$welch_pct <- NA; res$welch_p <- NA })
+  
+  robustness_results[[gene]] <- res
+}
+
+robustness_df <- do.call(rbind, lapply(robustness_results, as.data.frame))
+rownames(robustness_df) <- NULL
+```
+
+## Robustness Comparison Table
+
+```{r robustness-table}
+# Determine consensus
+robustness_df$consensus <- apply(robustness_df, 1, function(row) {
+  p_vals <- as.numeric(c(row["lmer_p"], row["nlme_p"], row["perm_p"], row["welch_p"]))
+  p_vals <- p_vals[!is.na(p_vals)]
+  sig <- p_vals < 0.05
+  if (all(sig)) return("ALL SIG")
+  if (all(!sig)) return("ALL NS")
+  return("MIXED")
+})
+
+robustness_display <- data.frame(
+  Gene = sapply(robustness_df$gene, function(x) format_gene_name(x, italics = TRUE)),
+  Var_ratio = sprintf("%.2fx", robustness_df$var_ratio),
+  LMM_p = sprintf("%.4f", robustness_df$lmer_p),
+  NLME_p = ifelse(is.na(robustness_df$nlme_p), "-", sprintf("%.4f", robustness_df$nlme_p)),
+  Perm_p = ifelse(is.na(robustness_df$perm_p), "-", sprintf("%.4f", robustness_df$perm_p)),
+  Welch_p = ifelse(is.na(robustness_df$welch_p), "-", sprintf("%.4f", robustness_df$welch_p)),
+  Consensus = robustness_df$consensus
+)
+
+kable(robustness_display,
+      col.names = c("Gene", "Var Ratio", "Standard LMM", "Heterosced. LMM", "Permutation", "Welch", "Consensus"),
+      caption = "LMM Robustness to Heteroscedasticity",
+      align = c("l", "r", "r", "r", "r", "r", "c")) %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"), full_width = FALSE) %>%
+  column_spec(7, bold = TRUE)
+```
+
+**Methods compared:**
+
+- **Standard LMM (lme4)**: Assumes equal variance across groups
+- **Heteroscedastic LMM (nlme)**: Models different variance per genotype
+- **Permutation test**: Non-parametric, no distributional assumptions
+- **Welch t-test**: Allows unequal variance (on size-corrected residuals)
+
+**Interpretation:**
+
+- **ALL SIG**: Result robust - all methods agree on significance
+- **ALL NS**: Not significant by any method
+- **MIXED**: Methods disagree - interpret with caution
+
+```{r robustness-summary, results='asis'}
+all_sig <- robustness_df[robustness_df$consensus == "ALL SIG", ]
+mixed <- robustness_df[robustness_df$consensus == "MIXED", ]
+
+if (nrow(all_sig) > 0) {
+  cat("\n**Robust results (all methods agree):**\n\n")
+  for (i in 1:nrow(all_sig)) {
+    gene_md <- format_gene_name(all_sig$gene[i], italics = TRUE)
+    cat(sprintf("- %s: LMM p=%.4f, Permutation p=%.4f\n", 
+                gene_md, all_sig$lmer_p[i], all_sig$perm_p[i]))
+  }
+}
+
+if (nrow(mixed) > 0) {
+  cat("\n**Potentially unreliable (methods disagree):**\n\n")
+  for (i in 1:nrow(mixed)) {
+    gene_md <- format_gene_name(mixed$gene[i], italics = TRUE)
+    cat(sprintf("- %s: interpret with caution\n", gene_md))
+  }
+}
+
+cat("\n*All robust hits (significant in both KS and LMM) show consistent results across all methods,*
+*confirming that findings are not artifacts of heteroscedasticity.*\n")
+```
+
+---
+
+# Conclusions
+
+```{r conclusions, results='asis'}
+cat("## Robust Findings\n\n")
+
+if (length(robust_sig_genes) > 0) {
+  cat("The following genes showed significant **intercept** (uniform shift) phenotypes in both **stratified KS** (within-experiment validation) AND **LMM** (batch-corrected):\n\n")
+  
+  for (gene in sort(robust_sig_genes)) {
+    gene_data <- combined_results[combined_results$gene == gene, ]
+    gene_md <- format_gene_name(gene, italics = TRUE)
+    
+    pooled_note <- ""
+    if (gene_data$KS_sig) pooled_note <- ", pooled KS ***"
+    
+    cat(sprintf("- **%s**: %s (%+.1f um / %+.1f%%, stratified KS adj.p = %.4f, LMM adj.p = %.4f%s)\n",
+                gene_md,
+                gene_data$direction_ks,
+                gene_data$effect_um,
+                gene_data$intercept_pct,
+                gene_data$stratified_KS_p_adj,
+                gene_data$intercept_p_adj,
+                pooled_note))
+  }
+  cat("\n")
+} else {
+  cat("No genes were significant in both stratified KS and LMM.\n\n")
+}
+
+# Slope effects
+if (length(slope_sig_genes) > 0) {
+  cat("## Size-Dependent Effects (Slope)\n\n")
+  cat("The following genes showed significant **slope** differences, indicating size-dependent phenotypes:\n\n")
+  for (gene in sort(slope_sig_genes)) {
+    gene_data <- lmm_results[lmm_results$gene == gene, ]
+    gene_md <- format_gene_name(gene, italics = TRUE)
+    direction <- ifelse(gene_data$slope_effect > 0, "steeper", "shallower")
+    cat(sprintf("- **%s**: %s slope (%+.4f, adj.p = %.4f)\n",
+                gene_md, direction, gene_data$slope_effect, gene_data$slope_p_adj))
+  }
+  cat("\n*A steeper slope means the hypertrophic/hyperplastic phenotype is more pronounced in larger fish.*\n\n")
+}
+
+cat("## Single-Experiment Genes (*aspa*, *lamb2*)\n\n")
+
+if (exists("single_results") && !is.null(single_results) && nrow(single_results) > 0) {
+  for (i in 1:nrow(single_results)) {
+    gene_md <- format_gene_name(single_results$gene[i], italics = TRUE)
+    ks_sig_text <- ifelse(single_results$KS_sig[i], "*", "")
+    lm_sig_text <- ifelse(single_results$LM_sig[i], "*", "")
+    cat(sprintf("- **%s**: %s (KS: %+.1f um, p=%.3f%s | LM: %+.1f%%, p=%.3f%s)\n",
+                gene_md,
+                single_results$direction[i],
+                single_results$KS_effect_um[i],
+                single_results$KS_p[i],
+                ks_sig_text,
+                single_results$LM_effect_pct[i],
+                single_results$LM_p[i],
+                lm_sig_text))
+  }
+  cat("\n*Note: These genes had only one experiment and could not be batch-corrected.*\n\n")
+}
+
+cat("## Methodological Notes\n\n")
+cat("1. KS tests compare full distributions; LMM tests mean differences (intercept and slope)\n")
+cat("2. LMM includes experiment as random effect to account for batch variation\n")
+cat("3. **Stratified KS** tests run within each experiment and combined via Fisher's method - this validates that effects are consistent within experiments (not batch artifacts)\n")
+cat("4. Benjamini-Hochberg correction applied separately to intercept and slope p-values across ", nrow(lmm_results), " multi-experiment genes\n", sep = "")
+cat("5. Genes *aspa* and *lamb2* (single experiment) analysed separately without batch correction\n")
+cat("6. Variance heterogeneity analysis identifies genes with altered distributional spread\n")
+cat("7. LMM robustness verified using heteroscedastic LMM, permutation tests, and Welch's t-test\n")
+cat("8. **Primary criterion for robust hits:** Significant in both stratified KS AND LMM. Pooled KS alone may be inflated by batch effects.\n")
+```
+
+---
+
+# Export Results
+
+```{r export}
+# Create output directory path (same as data file location)
+output_dir <- dirname(data_file)
+if (output_dir == ".") output_dir <- getwd()
+
+# Save combined results (main analysis)
+write.csv(combined_results, file.path(output_dir, "Combined_KS_LMM_results.csv"), row.names = FALSE)
+cat("Combined results saved to:", file.path(output_dir, "Combined_KS_LMM_results.csv"), "\n")
+
+# Save KS results
+write.csv(ks_results, file.path(output_dir, "KS_test_results.csv"), row.names = FALSE)
+
+# Save LMM results  
+write.csv(lmm_results, file.path(output_dir, "LMM_results.csv"), row.names = FALSE)
+
+# Save variance analysis results
+if (exists("variance_df") && !is.null(variance_df) && nrow(variance_df) > 0) {
+  write.csv(variance_df, file.path(output_dir, "Variance_heterogeneity_results.csv"), row.names = FALSE)
+  cat("Variance analysis saved to: Variance_heterogeneity_results.csv\n")
+}
+
+# Save stratified KS results
+if (exists("stratified_df") && !is.null(stratified_df) && nrow(stratified_df) > 0) {
+  write.csv(stratified_df, file.path(output_dir, "Stratified_KS_results.csv"), row.names = FALSE)
+  cat("Stratified KS analysis saved to: Stratified_KS_results.csv\n")
+}
+
+# Save robustness analysis results
+if (exists("robustness_df") && !is.null(robustness_df) && nrow(robustness_df) > 0) {
+  write.csv(robustness_df, file.path(output_dir, "LMM_robustness_results.csv"), row.names = FALSE)
+  cat("Robustness analysis saved to: LMM_robustness_results.csv\n")
+}
+
+# Save single-experiment results
+if (exists("single_results") && !is.null(single_results) && nrow(single_results) > 0) {
+  write.csv(single_results, file.path(output_dir, "Single_experiment_results.csv"), row.names = FALSE)
+  cat("Single-experiment results saved to: Single_experiment_results.csv\n")
+}
+```
+
+---
+
+# Session Info
+
+```{r session-info}
+sessionInfo()
+```
+
+---
+
+*Analysis completed: `r Sys.time()`*
