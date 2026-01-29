@@ -2,12 +2,16 @@
 
 This repository contains analysis pipelines for the paper available here: https://doi.org/10.7554/eLife.107327.1
 
+![2025-04-15_fig3_lsat_growth_v3](https://github.com/user-attachments/assets/a6bb0fa8-5c5d-4cdb-92b3-f08571c49d63)
+
+
 # Code repository can be found here:
 
 1) morphology screen analysis:
 https://github.com/jeminchin/zebrafish_adipose_morphology_screen/tree/main/morphology_crispr_screen_analysis
 
 3) spatial responses to HFD:
+
 
 # Analysis reports can be found here:
 
@@ -18,7 +22,7 @@ https://jeminchin.github.io/zebrafish_adipose_morphology_screen/CRISPR_screen_an
 https://jeminchin.github.io/zebrafish_adipose_morphology_screen/foxp1_spatial_analysis_github.html
 
 
-![2025-04-15_fig3_lsat_growth_v3](https://github.com/user-attachments/assets/a6bb0fa8-5c5d-4cdb-92b3-f08571c49d63)
+
 
 ## Input images for screen
 1) two images:
