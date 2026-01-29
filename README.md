@@ -20,4 +20,4 @@ https://github.com/jeminchin/zebrafish_adipose_morphology_screen/tree/main/spati
 https://jeminchin.github.io/zebrafish_adipose_morphology_screen/CRISPR_screen_analysis_merged_v7.html
 
 2) spatial responses to HFD:
-https://jeminchin.github.io/zebrafish_adipose_morphology_screen/foxp1_spatial_analysis_github.html
+https://jeminchin.github.io/zebrafish_adipose_morphology_screen/foxp1_spatial_analysis_v2_FDR.html
