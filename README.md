@@ -11,6 +11,7 @@ This repository contains analysis pipelines for the paper available here: https:
 https://github.com/jeminchin/zebrafish_adipose_morphology_screen/tree/main/morphology_crispr_screen_analysis
 
 3) spatial responses to HFD:
+https://github.com/jeminchin/zebrafish_adipose_morphology_screen/tree/main/spatial_responses_to_HFD
 
 
 # Analysis reports can be found here:
