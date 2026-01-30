@@ -1,0 +1,693 @@
+---
+title: "F0 CRISPR Screen Structure Visualisations"
+author: "Minchin Lab"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    code_folding: hide
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE, fig.align = "center")
+```
+
+```{r load-packages}
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(patchwork)
+library(forcats)
+```
+
+```{r load-data}
+# Load data
+morph_data <- read.csv("CRISPR_screen_data_morphology_v7.csv", stringsAsFactors = FALSE)
+
+# Standardise experiment names
+morph_data$experiment <- tolower(trimws(morph_data$experiment))
+morph_data$experiment <- gsub("^exp([0-9]+)$", "expt\\1", morph_data$experiment)
+
+# Summary stats
+cat("Total fish:", nrow(morph_data), "\n")
+cat("Genes:", length(unique(morph_data$gene)), "\n")
+cat("Experiments:", length(unique(morph_data$experiment)), "\n")
+```
+
+# 1. Sample Size Overview
+
+Horizontal bar chart showing sample sizes per gene, stacked by genotype.
+
+```{r sample-size-bars, fig.width=6, fig.height=8}
+# Count fish per gene and genotype
+sample_counts <- morph_data %>%
+  group_by(gene, genotype) %>%
+  summarise(n = n(), .groups = "drop") %>%
+  mutate(genotype = factor(genotype, levels = c("control", "mutant")))
+
+# Total per gene for ordering
+gene_totals <- sample_counts %>%
+  group_by(gene) %>%
+  summarise(total = sum(n)) %>%
+  arrange(desc(total))
+
+sample_counts$gene <- factor(sample_counts$gene, levels = gene_totals$gene)
+
+# Colors
+genotype_colors <- c("control" = "grey70", "mutant" = "#2171B5")
+
+p_sample_size <- ggplot(sample_counts, aes(x = n, y = gene, fill = genotype)) +
+  geom_col(position = "stack", width = 0.7) +
+  geom_text(data = gene_totals, 
+            aes(x = total + 2, y = gene, label = total, fill = NULL),
+            hjust = 0, size = 3) +
+  scale_fill_manual(values = genotype_colors, 
+                    labels = c("Cas9-only controls", "Mutants")) +
+  scale_x_continuous(expand = expansion(mult = c(0, 0.15))) +
+  labs(x = "Number of fish", y = NULL, fill = NULL,
+       title = "Sample sizes per gene") +
+  theme_minimal(base_size = 11) +
+  theme(
+    axis.text.y = element_text(face = "italic"),
+    legend.position = "top",
+    panel.grid.major.y = element_blank(),
+    panel.grid.minor = element_blank()
+  )
+
+print(p_sample_size)
+
+ggsave("screen_sample_sizes.svg", p_sample_size, width = 6, height = 8)
+ggsave("screen_sample_sizes.png", p_sample_size, width = 6, height = 8, dpi = 300, bg = "white")
+```
+
+# 2. Experiment Structure Heatmap
+
+Shows which experiments contributed data for each gene, with cell intensity = number of fish.
+
+```{r experiment-heatmap, fig.width=8, fig.height=8}
+# Count fish per gene × experiment × genotype
+expt_structure <- morph_data %>%
+  group_by(gene, experiment, genotype) %>%
+  summarise(n = n(), .groups = "drop")
+
+# Create separate heatmaps for controls and mutants
+expt_ctrl <- expt_structure %>% 
+  filter(genotype == "control") %>%
+  select(-genotype)
+
+expt_mut <- expt_structure %>% 
+  filter(genotype == "mutant") %>%
+  select(-genotype)
+
+# Order genes by total n
+gene_order <- morph_data %>%
+  count(gene) %>%
+  arrange(desc(n)) %>%
+  pull(gene)
+
+# Order experiments
+expt_order <- sort(unique(morph_data$experiment))
+
+# Mutants heatmap
+p_heatmap_mut <- ggplot(expt_mut, aes(x = experiment, y = factor(gene, levels = rev(gene_order)), fill = n)) +
+  geom_tile(color = "white", linewidth = 0.5) +
+  geom_text(aes(label = n), color = "white", size = 3) +
+  scale_fill_gradient(low = "#9ECAE1", high = "#08519C", na.value = "grey95",
+                      name = "n fish") +
+  labs(x = NULL, y = NULL, title = "Mutants") +
+  theme_minimal(base_size = 10) +
+  theme(
+    axis.text.y = element_text(face = "italic"),
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    panel.grid = element_blank(),
+    legend.position = "right"
+  )
+
+# Controls heatmap  
+p_heatmap_ctrl <- ggplot(expt_ctrl, aes(x = experiment, y = factor(gene, levels = rev(gene_order)), fill = n)) +
+  geom_tile(color = "white", linewidth = 0.5) +
+  geom_text(aes(label = n), color = "black", size = 3) +
+  scale_fill_gradient(low = "grey90", high = "grey50", na.value = "white",
+                      name = "n fish") +
+  labs(x = NULL, y = NULL, title = "Cas9-only controls") +
+  theme_minimal(base_size = 10) +
+  theme(
+    axis.text.y = element_text(face = "italic"),
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    panel.grid = element_blank(),
+    legend.position = "right"
+  )
+
+p_heatmap_combined <- p_heatmap_ctrl | p_heatmap_mut
+print(p_heatmap_combined)
+
+ggsave("screen_experiment_structure.svg", p_heatmap_combined, width = 10, height = 8)
+ggsave("screen_experiment_structure.png", p_heatmap_combined, width = 10, height = 8, dpi = 300, bg = "white")
+```
+
+# 3. Replicate Consistency Plot
+
+For genes with multiple experiments, shows how experiment means compare.
+
+```{r replicate-consistency, fig.width=7, fig.height=6}
+# Calculate mean morphology value per gene × experiment
+# First need to calculate morphology values
+library(mgcv)
+
+# Fit GAM on controls
+all_controls <- morph_data %>% filter(genotype == "control")
+all_controls$log_feret <- log(all_controls$mean_feret)
+all_controls$log_area <- log(all_controls$total_adipose_area)
+gam_model <- gam(log_feret ~ s(log_area), data = all_controls)
+
+# Calculate morphology value
+morph_data$log_feret <- log(morph_data$mean_feret)
+morph_data$log_area <- log(morph_data$total_adipose_area)
+morph_data$predicted <- predict(gam_model, newdata = morph_data)
+morph_data$morph_value <- (exp(morph_data$log_feret - morph_data$predicted) - 1) * 100
+
+# Center on control mean per gene
+ctrl_means <- morph_data %>%
+  filter(genotype == "control") %>%
+  group_by(gene) %>%
+  summarise(ctrl_mean = mean(morph_value))
+
+morph_data <- morph_data %>%
+  left_join(ctrl_means, by = "gene") %>%
+  mutate(morph_centered = morph_value - ctrl_mean)
+
+# Experiment means for mutants
+expt_means <- morph_data %>%
+  filter(genotype == "mutant") %>%
+  group_by(gene, experiment) %>%
+  summarise(
+    mean_morph = mean(morph_centered),
+    n = n(),
+    se = sd(morph_centered) / sqrt(n()),
+    .groups = "drop"
+  )
+
+# Gene means
+gene_means <- expt_means %>%
+  group_by(gene) %>%
+  summarise(
+    overall_mean = mean(mean_morph),
+    n_expts = n(),
+    .groups = "drop"
+  ) %>%
+  filter(n_expts >= 2)  # Only genes with 2+ experiments
+
+# Filter to multi-experiment genes
+expt_means_multi <- expt_means %>%
+  filter(gene %in% gene_means$gene)
+
+# Order by overall effect
+gene_order_effect <- gene_means %>% arrange(overall_mean) %>% pull(gene)
+expt_means_multi$gene <- factor(expt_means_multi$gene, levels = gene_order_effect)
+gene_means$gene <- factor(gene_means$gene, levels = gene_order_effect)
+
+p_consistency <- ggplot() +
+  # Experiment means as points
+  geom_point(data = expt_means_multi, 
+             aes(x = mean_morph, y = gene, size = n),
+             color = "#2171B5", alpha = 0.7) +
+  # Gene overall mean as diamond
+  geom_point(data = gene_means,
+             aes(x = overall_mean, y = gene),
+             shape = 18, size = 4, color = "#08306B") +
+  # Reference line at 0
+  geom_vline(xintercept = 0, linetype = "dashed", color = "grey50") +
+  # Connect experiments within genes
+  geom_line(data = expt_means_multi,
+            aes(x = mean_morph, y = gene, group = gene),
+            color = "grey70", linewidth = 0.5) +
+  scale_size_continuous(range = c(2, 6), name = "n fish") +
+  labs(x = "Morphology effect (% shift from controls)", y = NULL,
+       title = "Replicate consistency",
+       subtitle = "Circles = experiment means, diamonds = gene means") +
+  theme_minimal(base_size = 11) +
+  theme(
+    axis.text.y = element_text(face = "italic"),
+    panel.grid.major.y = element_blank(),
+    legend.position = "right"
+  )
+
+print(p_consistency)
+
+ggsave("screen_replicate_consistency.svg", p_consistency, width = 7, height = 6)
+ggsave("screen_replicate_consistency.png", p_consistency, width = 7, height = 6, dpi = 300, bg = "white")
+```
+
+# 4. Replicate Quality Score
+
+Combines consistency and direction agreement across all measures (SL, Normalised Adiposity, Morphology) into a single quality score. Higher = more reproducible.
+
+```{r replicate-quality-score, fig.width=8, fig.height=7}
+# Load all measures data for SL and norm adiposity
+all_data <- read.csv("CRISPR_screen_data_all_measures_v7.csv", stringsAsFactors = FALSE)
+
+# Standardise experiment names in all_data
+standardise_exp <- function(exp) {
+  exp <- tolower(trimws(as.character(exp)))
+  # Handle '1.0', '2.0' etc
+  if (grepl("^[0-9]+(\\.[0-9]+)?$", exp)) {
+    num <- as.integer(as.numeric(exp))
+    return(paste0("expt", num))
+  }
+  # Handle 'exp1', 'expt1' etc
+  if (grepl("^exp[0-9]", exp) && !grepl("^expt", exp)) {
+    return(sub("^exp", "expt", exp))
+  }
+  return(exp)
+}
+all_data$experiment <- sapply(all_data$experiment, standardise_exp)
+
+# Calculate SL effect per gene × experiment
+sl_data <- all_data %>% filter(measure == "SL_um")
+sl_effects <- sl_data %>%
+  group_by(gene, experiment) %>%
+  summarise(
+    ctrl_mean = mean(value[genotype == "control"]),
+    mut_mean = mean(value[genotype == "mutant"]),
+    .groups = "drop"
+  ) %>%
+  filter(!is.na(ctrl_mean) & !is.na(mut_mean)) %>%
+  mutate(SL_effect = (mut_mean - ctrl_mean) / ctrl_mean * 100) %>%
+  select(gene, experiment, SL_effect)
+
+# Calculate Norm Adiposity effect per gene × experiment
+norm_data <- all_data %>% filter(measure == "norm_adiposity")
+norm_effects <- norm_data %>%
+  group_by(gene, experiment) %>%
+  summarise(
+    ctrl_mean = mean(value[genotype == "control"]),
+    mut_mean = mean(value[genotype == "mutant"]),
+    .groups = "drop"
+  ) %>%
+  filter(!is.na(ctrl_mean) & !is.na(mut_mean)) %>%
+  mutate(Norm_effect = (mut_mean - ctrl_mean) / ctrl_mean * 100) %>%
+  select(gene, experiment, Norm_effect)
+
+# Get morphology effects from expt_means (already calculated)
+morph_effects <- expt_means %>%
+  select(gene, experiment, Morph_effect = mean_morph)
+
+# Merge all effects
+effects <- sl_effects %>%
+  inner_join(norm_effects, by = c("gene", "experiment")) %>%
+  inner_join(morph_effects, by = c("gene", "experiment"))
+
+cat("Gene × experiment combinations with all measures:", nrow(effects), "\n")
+
+# Calculate quality score per gene
+calc_rep_consistency <- function(vals) {
+  if (length(vals) < 2) return(0.5)  # Single replicate - unknown
+  val_range <- max(vals) - min(vals)
+  # Score of 1 = no spread, 0 = huge spread (>50%)
+  max(0, 1 - val_range / 50)
+}
+
+calc_direction_consistency <- function(vals) {
+  if (length(vals) < 2) return(0.5)  # Single replicate - unknown
+  signs <- sign(vals)
+  # All same sign = 1, mixed = 0
+  if (all(signs >= 0) || all(signs <= 0)) return(1.0) else return(0.0)
+}
+
+# Calculate scores per gene
+gene_quality <- effects %>%
+  group_by(gene) %>%
+  summarise(
+    n_reps = n(),
+    SL_consist = calc_rep_consistency(SL_effect),
+    Norm_consist = calc_rep_consistency(Norm_effect),
+    Morph_consist = calc_rep_consistency(Morph_effect),
+    SL_dir = calc_direction_consistency(SL_effect),
+    Norm_dir = calc_direction_consistency(Norm_effect),
+    Morph_dir = calc_direction_consistency(Morph_effect),
+    .groups = "drop"
+  ) %>%
+  mutate(
+    avg_consistency = (SL_consist + Norm_consist + Morph_consist) / 3,
+    avg_direction = (SL_dir + Norm_dir + Morph_dir) / 3,
+    quality_score = (avg_consistency + avg_direction) / 2 * 100
+  ) %>%
+  arrange(desc(quality_score))
+
+cat("\nReplicate Quality Scores:\n")
+print(gene_quality %>% select(gene, n_reps, avg_consistency, avg_direction, quality_score) %>%
+        mutate(across(where(is.numeric), ~round(., 2))))
+
+# Plot with blue color scheme
+gene_quality$gene <- factor(gene_quality$gene, levels = rev(gene_quality$gene))
+
+# Blue gradient based on score
+p_quality <- ggplot(gene_quality, aes(x = quality_score, y = gene, fill = quality_score)) +
+  geom_col(width = 0.7) +
+  geom_text(aes(label = sprintf("%.0f", quality_score)), hjust = -0.2, size = 3) +
+  scale_fill_gradient(low = "#C6DBEF", high = "#08519C", 
+                      limits = c(0, 100), guide = "none") +
+  geom_vline(xintercept = 50, linetype = "dashed", color = "grey50", alpha = 0.7) +
+  scale_x_continuous(limits = c(0, 110), expand = c(0, 0)) +
+  labs(x = "Replicate Quality Score (0-100)", y = NULL,
+       title = "Replicate Quality: Consistency + Direction Agreement",
+       subtitle = "Higher = more reproducible across SL, Norm Adiposity, and Morphology") +
+  theme_minimal(base_size = 11) +
+  theme(
+    axis.text.y = element_text(face = "italic"),
+    panel.grid.major.y = element_blank(),
+    panel.grid.minor = element_blank()
+  )
+
+print(p_quality)
+
+ggsave("screen_replicate_quality.svg", p_quality, width = 8, height = 7)
+ggsave("screen_replicate_quality.png", p_quality, width = 8, height = 7, dpi = 300, bg = "white")
+```
+
+# 5. Dumbbell Plot
+
+Control vs mutant means connected by lines - line length = effect size.
+
+```{r dumbbell-plot, fig.width=6, fig.height=8}
+# Calculate genotype means per gene
+genotype_means <- morph_data %>%
+  group_by(gene, genotype) %>%
+  summarise(mean_morph = mean(morph_value), .groups = "drop") %>%
+  pivot_wider(names_from = genotype, values_from = mean_morph) %>%
+  mutate(effect = mutant - control) %>%
+  arrange(effect)
+
+genotype_means$gene <- factor(genotype_means$gene, levels = genotype_means$gene)
+
+# Reshape for plotting
+dumbbell_data <- genotype_means %>%
+  pivot_longer(cols = c(control, mutant), names_to = "genotype", values_to = "mean_morph")
+
+p_dumbbell <- ggplot() +
+  # Connecting lines
+  geom_segment(data = genotype_means,
+               aes(x = control, xend = mutant, y = gene, yend = gene),
+               color = "grey60", linewidth = 0.8) +
+  # Control points
+  geom_point(data = genotype_means,
+             aes(x = control, y = gene),
+             color = "grey50", size = 3) +
+  # Mutant points
+  geom_point(data = genotype_means,
+             aes(x = mutant, y = gene),
+             color = "#2171B5", size = 3) +
+  # Reference line at 0
+  geom_vline(xintercept = 0, linetype = "dashed", color = "grey70") +
+  labs(x = "Morphology value (%)", y = NULL,
+       title = "Control vs Mutant morphology",
+       subtitle = "Grey = controls, Blue = mutants") +
+  theme_minimal(base_size = 11) +
+  theme(
+    axis.text.y = element_text(face = "italic"),
+    panel.grid.major.y = element_blank()
+  )
+
+print(p_dumbbell)
+
+ggsave("screen_dumbbell.svg", p_dumbbell, width = 6, height = 8)
+ggsave("screen_dumbbell.png", p_dumbbell, width = 6, height = 8, dpi = 300, bg = "white")
+```
+
+# 6. Screening Funnel/Sankey Diagram
+
+Flow diagram showing the discovery process: fish screened → genes tested → significant hits.
+
+```{r sankey-diagram, fig.width=8, fig.height=6}
+# Calculate summary stats (used here and later)
+total_fish <- nrow(morph_data)
+n_genes <- length(unique(morph_data$gene))
+n_mutants <- sum(morph_data$genotype == "mutant")
+n_controls <- sum(morph_data$genotype == "control")
+n_experiments <- length(unique(morph_data$experiment))
+
+# For Sankey we need the ggsankey or ggalluvial package
+# Using ggalluvial which is more commonly available
+
+if (!requireNamespace("ggalluvial", quietly = TRUE)) {
+  message("Installing ggalluvial...")
+  install.packages("ggalluvial", repos = "https://cloud.r-project.org")
+}
+library(ggalluvial)
+
+# Create flow data
+# We need: Fish → Gene → Phenotype outcome
+
+# Simplified version: show flow from experiments to genes to significance
+# First, let's create the data structure
+
+# For a proper Sankey, let's show:
+# Experiments → Genes → Phenotype (significant vs not)
+
+# Calculate which genes have significant effects (placeholder - update with real stats)
+# For now, let's use morphology effect > 15% as "hit"
+gene_effects <- morph_data %>%
+  filter(genotype == "mutant") %>%
+  group_by(gene) %>%
+  summarise(mean_effect = mean(morph_centered), .groups = "drop") %>%
+  mutate(outcome = case_when(
+    mean_effect > 20 ~ "Strong hypertrophic",
+    mean_effect > 10 ~ "Mild hypertrophic", 
+    mean_effect < -10 ~ "Hyperplastic",
+    TRUE ~ "No change"
+  ))
+
+# Create alluvial data
+sankey_data <- morph_data %>%
+  filter(genotype == "mutant") %>%
+  left_join(gene_effects %>% select(gene, outcome), by = "gene") %>%
+  count(experiment, gene, outcome)
+
+# Simplified 2-stage Sankey: Gene → Outcome
+sankey_simple <- gene_effects %>%
+  count(outcome) %>%
+  mutate(
+    stage1 = "Genes tested",
+    stage2 = outcome
+  )
+
+# Create alluvial plot
+p_sankey <- ggplot(sankey_data,
+       aes(axis1 = experiment, axis2 = gene, axis3 = outcome, y = n)) +
+  geom_alluvium(aes(fill = outcome), width = 1/12, alpha = 0.7) +
+  geom_stratum(width = 1/6, fill = "grey90", color = "grey50") +
+  geom_text(stat = "stratum", aes(label = after_stat(stratum)), size = 2.5) +
+  scale_x_discrete(limits = c("Experiment", "Gene", "Phenotype"), expand = c(0.1, 0.1)) +
+  scale_fill_manual(values = c(
+    "Strong hypertrophic" = "#08519C",
+    "Mild hypertrophic" = "#6BAED6", 
+    "No change" = "grey70",
+    "Hyperplastic" = "#FD8D3C"
+  )) +
+  labs(title = "Screen discovery flow",
+       subtitle = "Experiments → Genes → Phenotype outcomes",
+       y = "Number of fish", fill = "Outcome") +
+  theme_minimal(base_size = 11) +
+  theme(
+    legend.position = "bottom",
+    panel.grid = element_blank(),
+    axis.text.y = element_blank()
+  )
+
+print(p_sankey)
+
+ggsave("screen_sankey.svg", p_sankey, width = 10, height = 7)
+ggsave("screen_sankey.png", p_sankey, width = 10, height = 7, dpi = 300, bg = "white")
+```
+
+```{r sankey-simple, fig.width=7, fig.height=5}
+# Simpler 2-node Sankey: Genes → Outcomes
+sankey_genes <- gene_effects %>%
+  mutate(source = "Genes screened") %>%
+  count(source, outcome, name = "value")
+
+# Alternative: use networkD3 for interactive Sankey
+if (!requireNamespace("networkD3", quietly = TRUE)) {
+  message("For interactive Sankey, install networkD3")
+}
+
+# Static version using geom_col with curved connections
+# Create a cleaner "funnel" style flow
+
+flow_summary <- data.frame(
+  from_stage = c(rep("Fish screened", 2), rep("Genes tested", 4)),
+  to_stage = c("Controls", "Mutants", 
+               "Strong hypertrophic", "Mild hypertrophic", "No change", "Hyperplastic"),
+  n = c(n_controls, n_mutants,
+        sum(gene_effects$outcome == "Strong hypertrophic"),
+        sum(gene_effects$outcome == "Mild hypertrophic"),
+        sum(gene_effects$outcome == "No change"),
+        sum(gene_effects$outcome == "Hyperplastic"))
+)
+
+# Horizontal bar representation of flow
+p_flow <- ggplot() +
+  # Total fish bar
+  annotate("rect", xmin = 0, xmax = total_fish, ymin = 2.7, ymax = 3.3, 
+           fill = "#2171B5", alpha = 0.8) +
+  annotate("text", x = total_fish/2, y = 3, label = paste(total_fish, "fish"), 
+           color = "white", fontface = "bold", size = 5) +
+  
+
+  # Split: controls vs mutants
+ annotate("rect", xmin = 0, xmax = n_controls, ymin = 1.7, ymax = 2.3, 
+           fill = "grey60") +
+  annotate("text", x = n_controls/2, y = 2, 
+           label = paste0("Controls\n", n_controls), color = "white", size = 3.5) +
+  annotate("rect", xmin = n_controls + 5, xmax = n_controls + 5 + n_mutants, 
+           ymin = 1.7, ymax = 2.3, fill = "#2171B5") +
+  annotate("text", x = n_controls + 5 + n_mutants/2, y = 2, 
+           label = paste0("Mutants\n", n_mutants), color = "white", size = 3.5) +
+  
+  # Genes bar
+  annotate("rect", xmin = 0, xmax = n_genes * 15, ymin = 0.7, ymax = 1.3, 
+           fill = "#08519C", alpha = 0.9) +
+  annotate("text", x = n_genes * 15 / 2, y = 1, 
+           label = paste(n_genes, "genes"), color = "white", fontface = "bold", size = 5) +
+  
+  # Labels
+  annotate("text", x = -20, y = 3, label = "Total", hjust = 1, fontface = "bold") +
+  annotate("text", x = -20, y = 2, label = "Genotype", hjust = 1, fontface = "bold") +
+  annotate("text", x = -20, y = 1, label = "Genes", hjust = 1, fontface = "bold") +
+  
+  scale_y_continuous(limits = c(0.5, 3.5)) +
+  scale_x_continuous(limits = c(-80, total_fish + 20)) +
+  labs(title = "Screen structure") +
+  theme_void(base_size = 12) +
+  theme(plot.title = element_text(hjust = 0.5, face = "bold"))
+
+print(p_flow)
+
+ggsave("screen_flow_simple.svg", p_flow, width = 8, height = 4)
+ggsave("screen_flow_simple.png", p_flow, width = 8, height = 4, dpi = 300, bg = "white")
+```
+
+# 7. Screening Funnel Summary
+
+Visual summary of the screen scale (simple bar chart version).
+
+```{r funnel-summary, fig.width=8, fig.height=5}
+# Variables already calculated in Sankey section above
+
+# For significant hits, we'd need the stats - estimate based on typical results
+# You can update these numbers based on actual results
+funnel_data <- data.frame(
+  stage = c("Total fish\nscreened", "Genes\ntested", "Experiments"),
+  value = c(total_fish, n_genes, n_experiments),
+  label = c(paste0(total_fish, " fish"), paste0(n_genes, " genes"), paste0(n_experiments, " batches"))
+)
+
+funnel_data$stage <- factor(funnel_data$stage, levels = funnel_data$stage)
+
+# Simple pictogram-style summary
+p_funnel <- ggplot(funnel_data, aes(x = stage, y = value)) +
+  geom_col(fill = "#2171B5", width = 0.6) +
+  geom_text(aes(label = label), vjust = -0.5, size = 5, fontface = "bold") +
+  scale_y_continuous(expand = expansion(mult = c(0, 0.15))) +
+  labs(x = NULL, y = "Count", title = "Screen overview") +
+  theme_minimal(base_size = 12) +
+  theme(
+    panel.grid.major.x = element_blank(),
+    panel.grid.minor = element_blank(),
+    axis.text.x = element_text(size = 11)
+  )
+
+print(p_funnel)
+
+ggsave("screen_funnel.svg", p_funnel, width = 6, height = 4)
+ggsave("screen_funnel.png", p_funnel, width = 6, height = 4, dpi = 300, bg = "white")
+```
+
+# 8. Fish Pictogram (Waffle Chart)
+
+Each square represents fish, colored by genotype.
+
+```{r waffle-chart, fig.width=8, fig.height=6}
+# Create waffle-style data
+# Round to nearest 10 for cleaner visualization
+n_ctrl_round <- round(n_controls / 10) * 10
+n_mut_round <- round(n_mutants / 10) * 10
+
+# Create grid
+waffle_data <- data.frame(
+  genotype = c(rep("control", n_controls), rep("mutant", n_mutants))
+)
+
+# Add position
+n_cols <- 30
+waffle_data <- waffle_data %>%
+  mutate(
+    idx = row_number(),
+    x = ((idx - 1) %% n_cols) + 1,
+    y = ((idx - 1) %/% n_cols) + 1
+  )
+
+p_waffle <- ggplot(waffle_data, aes(x = x, y = y, fill = genotype)) +
+  geom_tile(color = "white", linewidth = 0.3) +
+  scale_fill_manual(values = c("control" = "grey70", "mutant" = "#2171B5"),
+                    labels = c(paste0("Controls (n=", n_controls, ")"), 
+                              paste0("Mutants (n=", n_mutants, ")"))) +
+  coord_equal() +
+  labs(title = paste("Total fish screened:", total_fish),
+       fill = NULL) +
+  theme_void(base_size = 12) +
+  theme(
+    legend.position = "bottom",
+    plot.title = element_text(hjust = 0.5, face = "bold")
+  )
+
+print(p_waffle)
+
+ggsave("screen_waffle.svg", p_waffle, width = 8, height = 6)
+ggsave("screen_waffle.png", p_waffle, width = 8, height = 6, dpi = 300, bg = "white")
+```
+
+# 9. Combined Summary Figure
+
+A polished combined figure for the paper.
+
+```{r combined-figure, fig.width=12, fig.height=8}
+# Combine key plots
+p_combined <- (p_sample_size | p_dumbbell) / 
+              (p_waffle | p_consistency) +
+  plot_annotation(
+    title = "F0 CRISPR Screen Structure",
+    tag_levels = "a"
+  ) &
+  theme(plot.tag = element_text(face = "bold", size = 14))
+
+print(p_combined)
+
+ggsave("screen_structure_combined.svg", p_combined, width = 12, height = 10)
+ggsave("screen_structure_combined.png", p_combined, width = 12, height = 10, dpi = 300, bg = "white")
+```
+
+---
+
+# Output Files
+
+```{r list-outputs, results='asis'}
+cat("
+**Individual plots:**
+
+- `screen_sample_sizes.svg/png` - Sample sizes per gene
+- `screen_experiment_structure.svg/png` - Experiment × gene heatmap
+- `screen_replicate_consistency.svg/png` - Replicate consistency
+- `screen_replicate_quality.svg/png` - Replicate quality score (consistency + direction)
+- `screen_dumbbell.svg/png` - Control vs mutant dumbbell plot
+- `screen_sankey.svg/png` - Sankey/alluvial diagram (experiments → genes → outcomes)
+- `screen_flow_simple.svg/png` - Simple flow diagram
+- `screen_funnel.svg/png` - Screen overview bars
+- `screen_waffle.svg/png` - Fish pictogram
+
+**Combined:**
+
+- `screen_structure_combined.svg/png` - Multi-panel summary figure
+")
+```
