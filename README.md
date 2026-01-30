@@ -7,23 +7,29 @@ This repository contains analysis pipelines for the paper available here: https:
 
 # Code repository can be found here:
 
-1) General screen structure:
+1) general screen structure:
 https://github.com/jeminchin/zebrafish_adipose_morphology_screen/tree/main/screen_structure
 
 2) morphology screen analysis:
 https://github.com/jeminchin/zebrafish_adipose_morphology_screen/tree/main/morphology_crispr_screen_analysis
+https://github.com/jeminchin/zebrafish_adipose_morphology_screen/tree/main/screen_forest_plots
 
-3) spatial responses to HFD:
+3) screen forest plots:
+
+4) spatial responses to HFD:
 https://github.com/jeminchin/zebrafish_adipose_morphology_screen/tree/main/spatial_responses_to_HFD
 
 
 # Analysis reports can be found here:
 
-1) General screen structure:
+1) general screen structure:
 https://jeminchin.github.io/zebrafish_adipose_morphology_screen/screen_structure_visualisations_v4.html
 
-2) morphology screen analysis:
+2) screen forest plots:
+https://jeminchin.github.io/zebrafish_adipose_morphology_screen/CRISPR_screen_all_forest_plots_v7-1.html
+
+3) morphology screen analysis:
 https://jeminchin.github.io/zebrafish_adipose_morphology_screen/CRISPR_screen_analysis_merged_v7.html
 
-3) spatial responses to HFD:
+4) spatial responses to HFD:
 https://jeminchin.github.io/zebrafish_adipose_morphology_screen/foxp1_spatial_analysis_v2_FDR.html
