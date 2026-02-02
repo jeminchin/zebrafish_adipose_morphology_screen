@@ -1,0 +1,1065 @@
+---
+title: "F0 CRISPR Screen: Body Size, Adiposity, and Morphology Forest Plots"
+subtitle: "Standard Length, Normalised Adiposity, Morphology Effect, Droplet Count, Droplet Area, and Depot vs Morphology Scatter"
+author: "Minchin Lab"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    toc_depth: 3
+    code_folding: hide
+    theme: flatly
+    highlight: tango
+    fig_width: 6
+    fig_height: 10
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo = TRUE,
+  warning = FALSE,
+  message = FALSE,
+  fig.align = "center"
+)
+```
+
+# Overview
+
+This document presents forest plots for body size, adiposity, and morphology measures from the F0 CRISPR screen:
+
+1. **Standard Length (SL)** - Body size
+2. **Normalised Adiposity (TAT/SL2)** - Size-corrected total adipose tissue  
+3. **Morphology Effect (LMM Intercept)** - Deviation in Feret diameter from expected given total adipose
+4. **Droplet Count** - Number of lipid droplets per fish
+5. **Mean Droplet Area** - Average lipid droplet size
+6. **Depot Size vs Morphology Scatter** - Relationship between depot lipid area and cell morphology
+
+**Statistical approach:** All measures use **Linear Mixed Models (LMM)** with experiment as a random effect to account for batch variation:
+
+- SL, Norm Adiposity, Droplet Count, Droplet Area: `value ~ genotype + (1|experiment)`
+- Morphology Effect: `log(Feret) ~ log(AreaSum) + genotype + (1|experiment)`
+
+The morphology effect additionally includes size-correction via `log(AreaSum)` to identify hypertrophic (larger droplets than expected) vs hyperplastic (more, smaller droplets) phenotypes.
+
+**Note:** *lamb2* is excluded (single replicate, n=5 mutants).
+
+# Setup
+
+```{r load-packages}
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(mgcv)
+library(lme4)
+library(lmerTest)
+library(knitr)
+library(kableExtra)
+```
+
+```{r load-data}
+# Load the SL/TAT/measures data
+sl_tat_file <- "CRISPR_screen_data_all_measures_v7.csv"
+all_data <- read.csv(sl_tat_file, stringsAsFactors = FALSE)
+
+# Load the morphology data (for Feret/morphology effect analysis)
+morph_file <- "CRISPR_screen_data_morphology_v7.csv"
+morph_data <- read.csv(morph_file, stringsAsFactors = FALSE)
+
+# Standardise experiment names
+standardise_exp_name <- function(exp_name) {
+  exp_name <- tolower(trimws(exp_name))
+  exp_name <- gsub("^exp([0-9]+)$", "expt\\1", exp_name)
+  return(exp_name)
+}
+all_data$experiment <- sapply(all_data$experiment, standardise_exp_name)
+morph_data$experiment <- sapply(morph_data$experiment, standardise_exp_name)
+
+cat("SL/TAT data:", nrow(all_data), "observations\n")
+cat("Morphology data:", nrow(morph_data), "fish\n")
+cat("Genes:", length(unique(morph_data$gene)), "\n")
+```
+
+```{r helper-functions}
+# Format gene name (italicized for markdown)
+format_gene_name <- function(gene, italics = TRUE) {
+  if (italics) return(paste0("*", gene, "*"))
+  return(gene)
+}
+
+# =============================================================================
+# LMM-BASED ANALYSIS FOR ALL MEASURES
+# =============================================================================
+#
+# Previously, only morphology used LMM with batch correction. Now ALL measures
+# use the same approach for consistency:
+#
+#   value ~ genotype + (1|experiment)
+#
+# This accounts for systematic differences between experiments (batch effects)
+# and gives more accurate p-values when batch variation exists.
+#
+# For genes with only 1 experiment, falls back to simple t-test.
+# =============================================================================
+
+run_lmm_analysis <- function(data, measure_name) {
+  measure_data <- data %>% filter(measure == measure_name)
+  
+  genes <- unique(measure_data$gene)
+  results_list <- list()
+  
+  for (g in genes) {
+    gene_data <- measure_data %>% 
+      filter(gene == g, !is.na(value))
+    
+    n_ctrl <- sum(gene_data$genotype == "control")
+    n_mut <- sum(gene_data$genotype == "mutant")
+    n_expts <- length(unique(gene_data$experiment))
+    
+    if (n_ctrl < 3 || n_mut < 3) next
+    
+    ctrl_mean <- mean(gene_data$value[gene_data$genotype == "control"])
+    mut_mean <- mean(gene_data$value[gene_data$genotype == "mutant"])
+    
+    gene_data$genotype <- factor(gene_data$genotype, levels = c("control", "mutant"))
+    
+    # Use LMM if >= 2 experiments, otherwise fall back to t-test
+    if (n_expts >= 2) {
+      tryCatch({
+        model <- lmer(value ~ genotype + (1 | experiment), data = gene_data, REML = TRUE)
+        coefs <- summary(model)$coefficients
+        
+        effect_raw <- as.numeric(coefs["genotypemutant", "Estimate"])
+        effect_se <- as.numeric(coefs["genotypemutant", "Std. Error"])
+        p_value <- as.numeric(coefs["genotypemutant", "Pr(>|t|)"])
+        
+        # Convert to % change relative to control mean
+        effect_pct <- effect_raw / ctrl_mean * 100
+        
+        results_list[[g]] <- data.frame(
+          gene = g,
+          n_ctrl = n_ctrl,
+          n_mut = n_mut,
+          n_expts = n_expts,
+          ctrl_mean = ctrl_mean,
+          mut_mean = mut_mean,
+          effect_pct = effect_pct,
+          p_value = p_value,
+          method = "LMM",
+          stringsAsFactors = FALSE
+        )
+      }, error = function(e) {
+        # If LMM fails, fall back to t-test
+        tt <- t.test(gene_data$value[gene_data$genotype == "mutant"],
+                     gene_data$value[gene_data$genotype == "control"])
+        results_list[[g]] <<- data.frame(
+          gene = g,
+          n_ctrl = n_ctrl,
+          n_mut = n_mut,
+          n_expts = n_expts,
+          ctrl_mean = ctrl_mean,
+          mut_mean = mut_mean,
+          effect_pct = (mut_mean - ctrl_mean) / ctrl_mean * 100,
+          p_value = tt$p.value,
+          method = "t-test (LMM failed)",
+          stringsAsFactors = FALSE
+        )
+      })
+    } else {
+      # Single experiment - use t-test
+      tt <- t.test(gene_data$value[gene_data$genotype == "mutant"],
+                   gene_data$value[gene_data$genotype == "control"])
+      results_list[[g]] <- data.frame(
+        gene = g,
+        n_ctrl = n_ctrl,
+        n_mut = n_mut,
+        n_expts = n_expts,
+        ctrl_mean = ctrl_mean,
+        mut_mean = mut_mean,
+        effect_pct = (mut_mean - ctrl_mean) / ctrl_mean * 100,
+        p_value = tt$p.value,
+        method = "t-test (single expt)",
+        stringsAsFactors = FALSE
+      )
+    }
+  }
+  
+  results <- do.call(rbind, results_list)
+  rownames(results) <- NULL
+  
+  # BH correction
+  results$p_adj <- p.adjust(results$p_value, method = "BH")
+  results$sig <- results$p_adj < 0.05
+  
+  return(results)
+}
+
+# Calculate % change from control mean for individual fish (for plotting)
+# Centers on control mean so datapoints align with effect estimates
+calc_pct_change <- function(data, measure_name) {
+  measure_data <- data %>% filter(measure == measure_name)
+  
+  ctrl_means <- measure_data %>%
+    filter(genotype == "control") %>%
+    group_by(gene) %>%
+    summarise(ctrl_mean = mean(value, na.rm = TRUE), .groups = "drop")
+  
+  measure_data %>%
+    left_join(ctrl_means, by = "gene") %>%
+    mutate(pct_change = (value - ctrl_mean) / ctrl_mean * 100)
+}
+```
+
+```{r forest-plot-function}
+# =============================================================================
+# FOREST PLOT FUNCTION
+# =============================================================================
+#
+# Creates a forest plot showing three levels of data hierarchy:
+#
+#   1. SMALL GREY DOTS = Individual mutant fish
+#      - Each dot is one fish's % change from control mean
+#      - Jittered vertically for visibility
+#      - Shows the full distribution of individual variation
+#
+#   2. MEDIUM GREY CIRCLES = Experiment means
+#      - Mean of mutant fish within each experiment/replicate
+#      - Shows consistency across biological replicates
+#      - Should bracket the overall gene mean if data is consistent
+#
+#   3. BLACK DIAMOND = Gene mean (overall effect)
+#      - For simple measures (SL, adiposity): mean % change vs controls
+#      - For morphology: LMM intercept coefficient (batch-corrected)
+#      - The primary statistic reported in tables
+#
+# Visual interpretation:
+#   - If circles cluster tightly around diamond = consistent across replicates
+#   - If circles spread widely = high batch-to-batch variation
+#   - If dots spread widely = high fish-to-fish variation within batches
+# =============================================================================
+
+create_forest_plot <- function(plot_data, expt_means, gene_stats, 
+                               title, xlab, gene_order) {
+  
+  # Set factor levels for ordering (genes ordered by effect size)
+  plot_data$gene <- factor(plot_data$gene, levels = gene_order)
+  expt_means$gene <- factor(expt_means$gene, levels = gene_order)
+  gene_stats$gene <- factor(gene_stats$gene, levels = gene_order)
+  
+  # Create plot - ALL GREY (no colour coding by significance)
+ p <- ggplot() +
+    # Reference line at 0 (no effect)
+    geom_vline(xintercept = 0, linetype = "dashed", color = "gray40", linewidth = 0.5) +
+    
+    # Layer 1: Individual fish (mutants only, small grey dots)
+    geom_jitter(
+      data = plot_data %>% filter(genotype == "mutant"),
+      aes(x = pct_change, y = gene),
+      color = "gray70",
+      width = 0, height = 0.2, size = 1.2, alpha = 0.35
+    ) +
+    
+    # Layer 2: Experiment means (medium grey circles with border)
+    geom_point(
+      data = expt_means,
+      aes(x = expt_mean, y = gene),
+      fill = "gray50", color = "gray30",
+      shape = 21, size = 3, stroke = 0.7, alpha = 0.85,
+      position = position_jitter(width = 0, height = 0.12, seed = 42)
+    ) +
+    
+    # Layer 3: Gene means (large black diamonds)
+    geom_point(
+      data = gene_stats,
+      aes(x = effect_pct, y = gene),
+      shape = 18, size = 4.5, color = "black"
+    ) +
+    
+    # Labels
+    labs(
+      title = title,
+      subtitle = "Dots = fish, Circles = experiment means, Diamonds = gene mean",
+      x = xlab,
+      y = NULL
+    ) +
+    
+    # Theme
+    theme_bw(base_size = 11) +
+    theme(
+      axis.text.y = element_text(face = "italic", size = 10, color = "gray30"),
+      panel.grid.major.y = element_blank(),
+      panel.grid.minor = element_blank(),
+      plot.title = element_text(face = "bold", size = 12),
+      plot.subtitle = element_text(size = 8, color = "gray40"),
+      legend.position = "none",
+      plot.margin = margin(5, 10, 5, 5)
+    )
+  
+  return(p)
+}
+```
+
+---
+
+# Analysis 1: Standard Length
+
+```{r sl-analysis}
+# =============================================================================
+# LMM: SL ~ genotype + (1|experiment)
+# Batch-corrected comparison of body size between mutants and controls
+# =============================================================================
+
+sl_stats <- run_lmm_analysis(all_data, "SL_um") %>% arrange(effect_pct)
+gene_order_sl <- sl_stats$gene
+
+# Individual % change (centered on control mean for plotting)
+sl_plot_data <- calc_pct_change(all_data, "SL_um")
+
+# Experiment means (mutants only)
+sl_expt_means <- sl_plot_data %>%
+  filter(genotype == "mutant") %>%
+  group_by(gene, experiment) %>%
+  summarise(expt_mean = mean(pct_change, na.rm = TRUE), .groups = "drop")
+
+cat("SL analysis: LMM used for", sum(sl_stats$method == "LMM"), "genes,",
+    "t-test for", sum(sl_stats$method != "LMM"), "genes\n")
+```
+
+## Statistical Summary
+
+```{r sl-table}
+sl_display <- sl_stats %>%
+  mutate(
+    Gene = sapply(gene, format_gene_name),
+    Effect = sprintf("%+.1f%%", effect_pct),
+    p_raw = ifelse(p_value < 0.001, sprintf("%.2e", p_value), sprintf("%.4f", p_value)),
+    p_adj_fmt = ifelse(p_adj < 0.001, sprintf("%.2e", p_adj), sprintf("%.4f", p_adj)),
+    Sig = ifelse(sig, "***", "")
+  ) %>%
+  select(Gene, n_ctrl, n_mut, n_expts, Effect, p_raw, p_adj_fmt, Sig)
+
+kable(sl_display, 
+      col.names = c("Gene", "n ctrl", "n mut", "Expts", "Effect (%)", "p (raw)", "p (BH adj)", ""),
+      caption = "Standard Length: LMM with batch correction (value ~ genotype + (1|experiment))",
+      escape = FALSE) %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"), full_width = FALSE)
+```
+
+## Forest Plot
+
+```{r sl-forest, fig.width=4, fig.height=10}
+p_sl <- create_forest_plot(
+  plot_data = sl_plot_data,
+  expt_means = sl_expt_means,
+  gene_stats = sl_stats,
+  title = "Standard Length",
+  xlab = "Effect on SL (% change from control)",
+  gene_order = gene_order_sl
+)
+print(p_sl)
+
+# Save
+ggsave("forest_plot_SL.svg", p_sl, width = 4, height = 10)
+ggsave("forest_plot_SL.png", p_sl, width = 4, height = 10, dpi = 200)
+```
+
+---
+
+# Analysis 2: Normalised Adiposity
+
+```{r norm-analysis}
+# =============================================================================
+# LMM: norm_adiposity ~ genotype + (1|experiment)
+# Batch-corrected comparison of size-normalised fat content
+# =============================================================================
+
+norm_stats <- run_lmm_analysis(all_data, "norm_adiposity") %>% arrange(effect_pct)
+gene_order_norm <- norm_stats$gene
+
+# Individual % change (centered on control mean for plotting)
+norm_plot_data <- calc_pct_change(all_data, "norm_adiposity")
+
+# Experiment means (mutants only)
+norm_expt_means <- norm_plot_data %>%
+  filter(genotype == "mutant") %>%
+  group_by(gene, experiment) %>%
+  summarise(expt_mean = mean(pct_change, na.rm = TRUE), .groups = "drop")
+
+cat("Norm adiposity analysis: LMM used for", sum(norm_stats$method == "LMM"), "genes,",
+    "t-test for", sum(norm_stats$method != "LMM"), "genes\n")
+```
+
+## Statistical Summary
+
+```{r norm-table}
+norm_display <- norm_stats %>%
+  mutate(
+    Gene = sapply(gene, format_gene_name),
+    Effect = sprintf("%+.1f%%", effect_pct),
+    p_raw = ifelse(p_value < 0.001, sprintf("%.2e", p_value), sprintf("%.4f", p_value)),
+    p_adj_fmt = ifelse(p_adj < 0.001, sprintf("%.2e", p_adj), sprintf("%.4f", p_adj)),
+    Sig = ifelse(sig, "***", "")
+  ) %>%
+  select(Gene, n_ctrl, n_mut, n_expts, Effect, p_raw, p_adj_fmt, Sig)
+
+kable(norm_display, 
+      col.names = c("Gene", "n ctrl", "n mut", "Expts", "Effect (%)", "p (raw)", "p (BH adj)", ""),
+      caption = "Normalised Adiposity (TAT/SL2): LMM with batch correction",
+      escape = FALSE) %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"), full_width = FALSE)
+```
+
+## Forest Plot
+
+```{r norm-forest, fig.width=4, fig.height=10}
+p_norm <- create_forest_plot(
+  plot_data = norm_plot_data,
+  expt_means = norm_expt_means,
+  gene_stats = norm_stats,
+  title = "Normalised Adiposity (TAT/SL2)",
+  xlab = "Effect on TAT/SL2 (% change from control)",
+  gene_order = gene_order_norm
+)
+print(p_norm)
+
+# Save
+ggsave("forest_plot_norm_adiposity.svg", p_norm, width = 4, height = 10)
+ggsave("forest_plot_norm_adiposity.png", p_norm, width = 4, height = 10, dpi = 200)
+```
+
+---
+
+# Analysis 3: Morphology Effect (LMM Intercept)
+
+This is the key morphology metric from the main analysis: the LMM intercept effect representing uniform shift in Feret diameter after accounting for total adipose area and batch effects.
+
+**Model:** `log(Feret) ~ log(AreaSum) + genotype + (1|experiment)`
+
+This matches the v7 morphology analysis exactly.
+
+```{r morph-lmm-analysis}
+# =============================================================================
+# LINEAR MIXED MODEL ANALYSIS FOR MORPHOLOGY EFFECT
+# =============================================================================
+#
+# This analysis matches the v7 morphology Rmd exactly.
+#
+# MODEL: log(Feret) ~ log(AreaSum) + genotype + (1|experiment)
+#
+# Components:
+#   - log(Feret): Mean Feret diameter per fish (log-transformed)
+#   - log(AreaSum): Total adipose area per fish (log-transformed) - controls for size
+#   - genotype: Fixed effect (control vs mutant) - THE EFFECT WE WANT
+#   - (1|experiment): Random intercept for experiment - batch correction
+#
+# The genotype coefficient represents the UNIFORM SHIFT in log(Feret) for mutants
+# vs controls, after accounting for:
+#   1. Fish size (via log(AreaSum))
+#   2. Batch differences between experiments (random effect)
+#
+# Positive effect = Hypertrophic (larger droplets than expected for total fat)
+# Negative effect = Hyperplastic (smaller droplets than expected for total fat)
+#
+# The effect is converted to % change: (exp(coefficient) - 1) * 100
+# =============================================================================
+
+genes <- unique(morph_data$gene)
+lmm_results_list <- list()
+
+for (g in genes) {
+  gene_data <- morph_data %>% 
+    filter(gene == g, !is.na(mean_feret), !is.na(total_adipose_area),
+           total_adipose_area > 0, mean_feret > 0)
+  
+  if (nrow(gene_data) < 10) next
+  
+  # Need at least 2 experiments for random effect
+  if (length(unique(gene_data$experiment)) < 2) next
+  
+  # Log transform
+  gene_data$log_Feret <- log(gene_data$mean_feret)
+  gene_data$log_AreaSum <- log(gene_data$total_adipose_area)
+  gene_data$genotype <- factor(gene_data$genotype, levels = c("control", "mutant"))
+  
+  tryCatch({
+    # Fit LMM (matching v7 exactly)
+    model <- lmer(log_Feret ~ log_AreaSum + genotype + (1 | experiment), 
+                  data = gene_data, REML = TRUE)
+    
+    coefs <- summary(model)$coefficients
+    
+    # Extract the genotype effect (mutant vs control)
+    intercept_effect <- as.numeric(coefs["genotypemutant", "Estimate"])
+    intercept_se <- as.numeric(coefs["genotypemutant", "Std. Error"])
+    intercept_t <- as.numeric(coefs["genotypemutant", "t value"])
+    intercept_p <- as.numeric(coefs["genotypemutant", "Pr(>|t|)"])
+    
+    # Convert log-scale effect to percentage
+    # e.g., coefficient of 0.15 -> (exp(0.15) - 1) * 100 = +16.2%
+    intercept_pct <- (exp(intercept_effect) - 1) * 100
+    
+    lmm_results_list[[g]] <- data.frame(
+      gene = g,
+      n_ctrl = sum(gene_data$genotype == "control"),
+      n_mut = sum(gene_data$genotype == "mutant"),
+      n_experiments = length(unique(gene_data$experiment)),
+      intercept_effect = intercept_effect,
+      intercept_pct = intercept_pct,
+      intercept_se = intercept_se,
+      intercept_t = intercept_t,
+      intercept_p = intercept_p,
+      stringsAsFactors = FALSE
+    )
+  }, error = function(e) NULL)
+}
+
+morph_lmm_results <- do.call(rbind, lmm_results_list)
+rownames(morph_lmm_results) <- NULL
+
+# BH correction for multiple testing
+morph_lmm_results$p_adj <- p.adjust(morph_lmm_results$intercept_p, method = "BH")
+morph_lmm_results$sig <- morph_lmm_results$p_adj < 0.05
+morph_lmm_results$direction <- ifelse(morph_lmm_results$intercept_pct > 0, "Hypertrophic", "Hyperplastic")
+
+cat("LMM analysis completed for", nrow(morph_lmm_results), "genes\n")
+```
+
+```{r morph-residuals-for-plot}
+# =============================================================================
+# CALCULATING INDIVIDUAL FISH RESIDUALS FOR FOREST PLOT VISUALISATION
+# =============================================================================
+#
+# The forest plot shows three levels of data:
+#   1. Small dots   = individual mutant fish (% deviation from expected Feret)
+#   2. Circles      = experiment means (mean of mutant fish within each experiment)
+#   3. Diamond      = gene effect (LMM intercept coefficient, batch-corrected)
+#
+# IMPORTANT: The LMM effect (diamond) represents the genotype coefficient from:
+#   log(Feret) ~ log(AreaSum) + genotype + (1|experiment)
+# This is the difference between mutant and control AFTER accounting for:
+#   - The size-scaling relationship (log(AreaSum))
+#   - Batch effects between experiments (random intercept)
+#
+# For the individual fish and experiment means to align with the LMM effect,
+# we need to:
+#   1. Calculate residuals from a size-correction model fitted to controls
+#   2. Convert to % change: (exp(residual) - 1) * 100
+#   3. CENTER on the control mean (subtract control mean from all values)
+#
+# Without step 3, the control mean would be non-zero (due to regression to mean),
+# and the mutant datapoints would be offset from the LMM effect diamond.
+# =============================================================================
+
+morph_resid_list <- list()
+
+for (g in unique(morph_lmm_results$gene)) {
+  gene_data <- morph_data %>% 
+    filter(gene == g, !is.na(mean_feret), !is.na(total_adipose_area),
+           total_adipose_area > 0, mean_feret > 0)
+  
+  if (nrow(gene_data) < 10) next
+  
+  gene_data$log_Feret <- log(gene_data$mean_feret)
+  gene_data$log_AreaSum <- log(gene_data$total_adipose_area)
+  gene_data$genotype <- factor(gene_data$genotype, levels = c("control", "mutant"))
+  
+  # Fit model to controls only to get baseline size-scaling relationship
+  ctrl_data <- gene_data %>% filter(genotype == "control")
+  
+  tryCatch({
+    # Step 1: Fit simple linear model on controls (pooled across experiments)
+    # This captures the expected Feret diameter given total adipose area
+    ctrl_model <- lm(log_Feret ~ log_AreaSum, data = ctrl_data)
+    
+    # Step 2: Calculate residuals for ALL fish (control + mutant)
+    # Residual = observed log(Feret) - expected log(Feret) given size
+    gene_data$predicted_log_feret <- predict(ctrl_model, newdata = gene_data)
+    gene_data$log_residual <- gene_data$log_Feret - gene_data$predicted_log_feret
+    
+    # Convert log residuals to % change
+    # If residual = 0.15, then % change = (exp(0.15) - 1) * 100 = +16.2%
+    gene_data$raw_pct_change <- (exp(gene_data$log_residual) - 1) * 100
+    
+    # Step 3: CENTER ON CONTROL MEAN
+    # The control mean won't be exactly 0 due to the nature of residuals
+    # Subtracting it ensures:
+    #   - Control fish are centered around 0%
+    #   - Mutant fish show deviation FROM controls (matching LMM interpretation)
+    #   - Experiment means bracket the overall mutant mean correctly
+    ctrl_mean_pct <- mean(gene_data$raw_pct_change[gene_data$genotype == "control"])
+    gene_data$pct_change <- gene_data$raw_pct_change - ctrl_mean_pct
+    
+    morph_resid_list[[g]] <- gene_data %>%
+      select(gene, genotype, experiment, mean_feret, total_adipose_area, pct_change)
+  }, error = function(e) NULL)
+}
+
+morph_plot_data <- bind_rows(morph_resid_list)
+
+cat("Residuals calculated for", length(unique(morph_plot_data$gene)), "genes\n")
+cat("Total fish:", nrow(morph_plot_data), "\n")
+```
+
+```{r morph-stats}
+# =============================================================================
+# PREPARE STATS FOR PLOTTING
+# =============================================================================
+#
+# NOTE ON LMM vs SIMPLE MEAN:
+# The diamond shows the LMM effect (batch-corrected), while the experiment
+# circles show simple means within each experiment. These may differ slightly
+# because the LMM weights experiments by precision and accounts for batch effects.
+# The individual fish dots and experiment circles should be internally consistent
+# (circles bracket the overall simple mean), while the diamond may be slightly
+# offset due to batch correction.
+# =============================================================================
+
+morph_stats <- morph_lmm_results %>%
+  select(gene, n_ctrl, n_mut, effect_pct = intercept_pct, p_value = intercept_p, p_adj, sig, direction) %>%
+  arrange(effect_pct)
+
+gene_order_morph <- morph_stats$gene
+
+# Experiment means (mutants only) - these are SIMPLE means, not LMM-adjusted
+morph_expt_means <- morph_plot_data %>%
+  filter(genotype == "mutant") %>%
+  group_by(gene, experiment) %>%
+  summarise(expt_mean = mean(pct_change, na.rm = TRUE), .groups = "drop")
+```
+
+## Statistical Summary
+
+```{r morph-table}
+morph_display <- morph_stats %>%
+  mutate(
+    Gene = sapply(gene, format_gene_name),
+    Effect = sprintf("%+.2f%%", effect_pct),
+    p_raw = ifelse(p_value < 0.001, sprintf("%.2e", p_value), sprintf("%.4f", p_value)),
+    p_adj_fmt = ifelse(p_adj < 0.001, sprintf("%.2e", p_adj), sprintf("%.4f", p_adj)),
+    Sig = ifelse(sig, "***", "")
+  ) %>%
+  select(Gene, n_ctrl, n_mut, Effect, direction, p_raw, p_adj_fmt, Sig)
+
+kable(morph_display, 
+      col.names = c("Gene", "n ctrl", "n mut", "Effect (%)", "Direction", "p (raw)", "p (BH adj)", ""),
+      caption = "Morphology Effect (LMM Intercept): Uniform shift in droplet size (batch-corrected)",
+      escape = FALSE) %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"), full_width = FALSE)
+```
+
+## Forest Plot
+
+```{r morph-forest, fig.width=4, fig.height=10}
+p_morph <- create_forest_plot(
+  plot_data = morph_plot_data,
+  expt_means = morph_expt_means,
+  gene_stats = morph_stats,
+  title = "Morphology Effect (LMM Intercept)",
+  xlab = "Effect (% change in Feret diameter)",
+  gene_order = gene_order_morph
+) + 
+  coord_cartesian(xlim = c(-100, 100))  # Restrict x-axis to ±100%
+
+print(p_morph)
+
+# Save
+ggsave("forest_plot_morphology_effect.svg", p_morph, width = 4, height = 10)
+ggsave("forest_plot_morphology_effect.png", p_morph, width = 4, height = 10, dpi = 200)
+```
+
+---
+
+# Analysis 4: Droplet Count
+
+```{r droplet-n-analysis}
+# =============================================================================
+# LMM: droplet_count ~ genotype + (1|experiment)
+# Batch-corrected comparison of lipid droplet number
+# Note: NOT size-corrected (larger fish may have more droplets)
+# =============================================================================
+
+droplet_n_stats <- run_lmm_analysis(all_data, "droplet_count") %>% arrange(effect_pct)
+gene_order_droplet_n <- droplet_n_stats$gene
+
+# Individual % change (centered on control mean for plotting)
+droplet_n_plot_data <- calc_pct_change(all_data, "droplet_count")
+
+# Experiment means (mutants only)
+droplet_n_expt_means <- droplet_n_plot_data %>%
+  filter(genotype == "mutant") %>%
+  group_by(gene, experiment) %>%
+  summarise(expt_mean = mean(pct_change, na.rm = TRUE), .groups = "drop")
+
+cat("Droplet count analysis: LMM used for", sum(droplet_n_stats$method == "LMM"), "genes,",
+    "t-test for", sum(droplet_n_stats$method != "LMM"), "genes\n")
+```
+
+## Statistical Summary
+
+```{r droplet-n-table}
+droplet_n_display <- droplet_n_stats %>%
+  mutate(
+    Gene = sapply(gene, format_gene_name),
+    Effect = sprintf("%+.1f%%", effect_pct),
+    p_raw = ifelse(p_value < 0.001, sprintf("%.2e", p_value), sprintf("%.4f", p_value)),
+    p_adj_fmt = ifelse(p_adj < 0.001, sprintf("%.2e", p_adj), sprintf("%.4f", p_adj)),
+    Sig = ifelse(sig, "***", "")
+  ) %>%
+  select(Gene, n_ctrl, n_mut, n_expts, Effect, p_raw, p_adj_fmt, Sig)
+
+kable(droplet_n_display, 
+      col.names = c("Gene", "n ctrl", "n mut", "Expts", "Effect (%)", "p (raw)", "p (BH adj)", ""),
+      caption = "Droplet Count: LMM with batch correction",
+      escape = FALSE) %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"), full_width = FALSE)
+```
+
+## Forest Plot
+
+```{r droplet-n-forest, fig.width=4, fig.height=10}
+p_droplet_n <- create_forest_plot(
+  plot_data = droplet_n_plot_data,
+  expt_means = droplet_n_expt_means,
+  gene_stats = droplet_n_stats,
+  title = "Droplet Count",
+  xlab = "Effect on droplet number (% change from control)",
+  gene_order = gene_order_droplet_n
+)
+print(p_droplet_n)
+
+# Save
+ggsave("forest_plot_droplet_count.svg", p_droplet_n, width = 4, height = 10)
+ggsave("forest_plot_droplet_count.png", p_droplet_n, width = 4, height = 10, dpi = 200)
+```
+
+---
+
+# Analysis 5: Mean Droplet Area
+
+```{r droplet-area-analysis}
+# =============================================================================
+# LMM: mean_droplet_area ~ genotype + (1|experiment)
+# Batch-corrected comparison of lipid droplet size
+# Note: NOT size-corrected (larger fish may have larger droplets)
+# For size-corrected morphology, see Analysis 3 (LMM Intercept)
+# =============================================================================
+
+droplet_area_stats <- run_lmm_analysis(all_data, "mean_droplet_area") %>% arrange(effect_pct)
+gene_order_droplet_area <- droplet_area_stats$gene
+
+# Individual % change (centered on control mean for plotting)
+droplet_area_plot_data <- calc_pct_change(all_data, "mean_droplet_area")
+
+# Experiment means (mutants only)
+droplet_area_expt_means <- droplet_area_plot_data %>%
+  filter(genotype == "mutant") %>%
+  group_by(gene, experiment) %>%
+  summarise(expt_mean = mean(pct_change, na.rm = TRUE), .groups = "drop")
+
+cat("Droplet area analysis: LMM used for", sum(droplet_area_stats$method == "LMM"), "genes,",
+    "t-test for", sum(droplet_area_stats$method != "LMM"), "genes\n")
+```
+
+## Statistical Summary
+
+```{r droplet-area-table}
+droplet_area_display <- droplet_area_stats %>%
+  mutate(
+    Gene = sapply(gene, format_gene_name),
+    Effect = sprintf("%+.1f%%", effect_pct),
+    p_raw = ifelse(p_value < 0.001, sprintf("%.2e", p_value), sprintf("%.4f", p_value)),
+    p_adj_fmt = ifelse(p_adj < 0.001, sprintf("%.2e", p_adj), sprintf("%.4f", p_adj)),
+    Sig = ifelse(sig, "***", "")
+  ) %>%
+  select(Gene, n_ctrl, n_mut, n_expts, Effect, p_raw, p_adj_fmt, Sig)
+
+kable(droplet_area_display, 
+      col.names = c("Gene", "n ctrl", "n mut", "Expts", "Effect (%)", "p (raw)", "p (BH adj)", ""),
+      caption = "Mean Droplet Area: LMM with batch correction",
+      escape = FALSE) %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"), full_width = FALSE)
+```
+
+## Forest Plot
+
+```{r droplet-area-forest, fig.width=4, fig.height=10}
+p_droplet_area <- create_forest_plot(
+  plot_data = droplet_area_plot_data,
+  expt_means = droplet_area_expt_means,
+  gene_stats = droplet_area_stats,
+  title = "Mean Droplet Area",
+  xlab = "Effect on droplet area (% change from control)",
+  gene_order = gene_order_droplet_area
+)
+print(p_droplet_area)
+
+# Save
+ggsave("forest_plot_droplet_area.svg", p_droplet_area, width = 4, height = 10)
+ggsave("forest_plot_droplet_area.png", p_droplet_area, width = 4, height = 10, dpi = 200)
+```
+
+---
+
+# Summary
+
+```{r summary-table}
+# Key genes
+key_genes <- c("mmp14b", "foxp1b", "txnipa", "kazna", "tbx15")
+
+# Merge all stats for key genes
+summary_df <- data.frame(gene = key_genes) %>%
+  left_join(sl_stats %>% select(gene, SL_pct = effect_pct, SL_sig = sig), by = "gene") %>%
+  left_join(norm_stats %>% select(gene, Norm_pct = effect_pct, Norm_sig = sig), by = "gene") %>%
+  left_join(morph_stats %>% select(gene, Morph_pct = effect_pct, Morph_sig = sig, Morph_dir = direction), by = "gene") %>%
+  left_join(droplet_n_stats %>% select(gene, Drop_n_pct = effect_pct, Drop_n_sig = sig), by = "gene") %>%
+  left_join(droplet_area_stats %>% select(gene, Drop_area_pct = effect_pct, Drop_area_sig = sig), by = "gene")
+
+summary_display <- summary_df %>%
+  mutate(
+    Gene = paste0("*", gene, "*"),
+    SL = sprintf("%+.1f%s", SL_pct, ifelse(SL_sig, "***", "")),
+    `Norm Adip` = sprintf("%+.1f%s", Norm_pct, ifelse(Norm_sig, "***", "")),
+    `Morph Effect` = sprintf("%+.1f%% (%s)%s", Morph_pct, substr(Morph_dir, 1, 5), ifelse(Morph_sig, "***", "")),
+    `Drop Count` = sprintf("%+.1f%s", Drop_n_pct, ifelse(Drop_n_sig, "***", "")),
+    `Drop Area` = sprintf("%+.1f%s", Drop_area_pct, ifelse(Drop_area_sig, "***", ""))
+  ) %>%
+  select(Gene, SL, `Norm Adip`, `Morph Effect`, `Drop Count`, `Drop Area`)
+
+kable(summary_display,
+      caption = "Summary: Key Gene Phenotypes (*** = BH-adjusted p < 0.05)",
+      escape = FALSE,
+      align = c("l", "r", "r", "r", "r", "r")) %>%
+  kable_styling(bootstrap_options = c("striped", "hover"), full_width = FALSE)
+```
+
+## Interpretation
+
+```{r interpretation, results='asis'}
+cat("
+### *mmp14b*
+- **SL:** +2% (ns) - Normal body size
+- **Normalised adiposity:** -1% (ns) - Normal total fat
+- **Morphology effect:** Hypertrophic (larger droplets than expected)
+- **Droplet count:** +2% (ns) - Normal number
+- **Droplet area:** +52% - Larger droplets
+
+Hypertrophic phenotype: Same total fat in larger droplets.
+
+---
+
+### *foxp1b*
+- **SL:** +1% (ns) - Normal body size
+- **Normalised adiposity:** -13% (trending) - Consistent with stable mutant phenotype
+- **Morphology effect:** Hypertrophic
+- **Droplet count:** +18% (ns)
+- **Droplet area:** +73%
+
+F0 data now consistent with stable mutants after control batch matching.
+
+---
+
+### *txnipa*
+- **SL:** +9% - Larger fish
+- **Normalised adiposity:** +25% - More fat (validates mouse *Txnip* KO)
+- **Morphology effect:** Hypertrophic
+- **Droplet count:** +24% (ns)
+- **Droplet area:** +67%
+
+True adiposity phenotype with larger droplets.
+
+---
+
+### *kazna*
+- **SL:** +10% - Larger fish
+- **Normalised adiposity:** +60%*** - **Significantly more fat**
+- **Morphology effect:** Hypertrophic
+- **Droplet count:** +90%*** - **Many more droplets**
+- **Droplet area:** +56%
+
+Strong adiposity phenotype. **Novel finding** - no published adipose phenotype.
+
+---
+
+### *tbx15*
+- **SL:** Normal body size
+- **Normalised adiposity:** Significantly reduced fat
+- **Morphology effect:** Hyperplastic (smaller droplets than expected)
+- **Droplet count:** Reduced
+- **Droplet area:** Smaller droplets
+
+**Significant adiposity phenotype** - reduced fat with hyperplastic morphology. Validates known role in adipose development.
+")
+```
+
+---
+
+# Analysis 6: Depot Size vs Morphology Scatter Plot
+
+This scatter plot combines the morphology LMM effect (Analysis 3) with depot lipid area to visualise the relationship between **how much fat** (depot size) and **what kind of fat** (cell morphology) each gene produces.
+
+- **X-axis:** Morphology value from the LMM intercept (identical to Analysis 3 forest plot)
+- **Y-axis:** Total depot lipid area (% change from controls, simple mean)
+- **Point size:** Number of mutant fish screened
+
+The four quadrants distinguish distinct biological strategies:
+
+- **Top-right:** Larger depot with hypertrophic cells (more fat in bigger droplets)
+- **Top-left:** Larger depot with hyperplastic cells (more fat in more/smaller droplets)
+- **Bottom-right:** Smaller depot with hypertrophic cells
+- **Bottom-left:** Smaller depot with hyperplastic cells
+
+```{r scatter-data}
+# =============================================================================
+# DEPOT SIZE vs MORPHOLOGY SCATTER PLOT
+# =============================================================================
+#
+# X-axis: Morphology LMM intercept from Analysis 3 (already computed as morph_stats)
+# Y-axis: Total depot lipid area (% change from controls)
+#
+# This reuses morph_stats from the morphology analysis above (morph_lmm_results),
+# ensuring the x-axis values are identical to the forest plot diamonds.
+# =============================================================================
+
+# Depot area: simple % change from controls
+ctrl_depot <- morph_data %>%
+  filter(genotype == "control", !is.na(total_adipose_area), total_adipose_area > 0) %>%
+  group_by(gene) %>%
+  summarise(ctrl_depot_area = mean(total_adipose_area, na.rm = TRUE), .groups = "drop")
+
+mut_depot <- morph_data %>%
+  filter(genotype == "mutant", !is.na(total_adipose_area), total_adipose_area > 0) %>%
+  group_by(gene) %>%
+  summarise(mut_depot_area = mean(total_adipose_area, na.rm = TRUE),
+            n_mut = n(), .groups = "drop")
+
+depot_df <- mut_depot %>%
+  left_join(ctrl_depot, by = "gene") %>%
+  mutate(depot_area_effect = (mut_depot_area - ctrl_depot_area) / ctrl_depot_area * 100)
+
+# Merge with morphology LMM results (from Analysis 3)
+scatter_df <- morph_lmm_results %>%
+  select(gene, morph_lmm = intercept_pct, n = n_mut) %>%
+  left_join(depot_df %>% select(gene, depot_area_effect), by = "gene")
+
+cat("Scatter plot data:\n")
+print(scatter_df %>% arrange(desc(morph_lmm)))
+```
+
+```{r scatter-plot, fig.width=8, fig.height=6.5}
+library(ggrepel)
+
+p_scatter <- ggplot(scatter_df, aes(x = morph_lmm, y = depot_area_effect)) +
+  geom_hline(yintercept = 0, colour = "grey70", linewidth = 0.5) +
+  geom_vline(xintercept = 0, colour = "grey70", linewidth = 0.5) +
+  geom_point(aes(size = n), colour = "#2171B5", alpha = 0.7) +
+  geom_text_repel(aes(label = gene), size = 3, fontface = "italic",
+                  colour = "#333333", segment.colour = "#AAAAAA",
+                  segment.size = 0.3, max.overlaps = Inf) +
+  scale_size_continuous(range = c(2, 8), name = "Sample size",
+                        breaks = c(15, 30, 60)) +
+  # Quadrant annotations
+  annotate("label", x = min(scatter_df$morph_lmm, na.rm = TRUE) * 0.85,
+           y = max(scatter_df$depot_area_effect, na.rm = TRUE) * 0.95,
+           label = "Hyperplastic cells\nLarger depot",
+           size = 2.8, colour = "#666666", fill = "#F7F7F7",
+           label.size = 0.3, label.r = unit(0.2, "lines")) +
+  annotate("label", x = max(scatter_df$morph_lmm, na.rm = TRUE) * 0.85,
+           y = max(scatter_df$depot_area_effect, na.rm = TRUE) * 0.95,
+           label = "Hypertrophic cells\nLarger depot",
+           size = 2.8, colour = "#666666", fill = "#F7F7F7",
+           label.size = 0.3, label.r = unit(0.2, "lines")) +
+  annotate("label", x = min(scatter_df$morph_lmm, na.rm = TRUE) * 0.85,
+           y = min(scatter_df$depot_area_effect, na.rm = TRUE) * 0.95,
+           label = "Hyperplastic cells\nSmaller depot",
+           size = 2.8, colour = "#666666", fill = "#F7F7F7",
+           label.size = 0.3, label.r = unit(0.2, "lines")) +
+  annotate("label", x = max(scatter_df$morph_lmm, na.rm = TRUE) * 0.85,
+           y = min(scatter_df$depot_area_effect, na.rm = TRUE) * 0.95,
+           label = "Hypertrophic cells\nSmaller depot",
+           size = 2.8, colour = "#666666", fill = "#F7F7F7",
+           label.size = 0.3, label.r = unit(0.2, "lines")) +
+  labs(x = "Morphology value (% change from controls)",
+       y = "Depot lipid area (% change from controls)") +
+  theme_minimal(base_size = 11) +
+  theme(
+    panel.grid.minor = element_blank(),
+    panel.grid.major = element_line(colour = "grey92"),
+    legend.position = c(0.9, 0.5)
+  )
+
+print(p_scatter)
+
+# Save
+ggsave("depot_vs_morphology_scatter.svg", p_scatter, width = 8, height = 6.5)
+ggsave("depot_vs_morphology_scatter.png", p_scatter, width = 8, height = 6.5, dpi = 300, bg = "white")
+```
+
+---
+
+# Excluded Gene: *lamb2*
+
+*lamb2* was excluded from analyses:
+
+- Single experiment only
+- n = 5 mutants (vs 18 controls)
+
+**Preliminary results:**
+
+- SL: +35%*** (larger fish)
+- Normalised adiposity: +127%** (very large increase)
+
+Requires independent validation.
+
+---
+
+# Export Results
+
+```{r export}
+# =============================================================================
+# EXPORT STATISTICS
+# All measures use LMM with batch correction: value ~ genotype + (1|experiment)
+# Morphology additionally includes size-correction via log(AreaSum)
+# =============================================================================
+
+# Combine all stats (note: columns may differ slightly between measures)
+all_stats <- bind_rows(
+  sl_stats %>% mutate(measure = "SL_um"),
+  norm_stats %>% mutate(measure = "norm_adiposity"),
+  morph_stats %>% mutate(measure = "morphology_LMM_intercept"),
+  droplet_n_stats %>% mutate(measure = "droplet_count"),
+  droplet_area_stats %>% mutate(measure = "mean_droplet_area")
+)
+
+# Save combined statistics
+write.csv(all_stats, "CRISPR_screen_all_measures_statistics.csv", row.names = FALSE)
+
+# Also save the full LMM results for morphology (includes additional columns)
+write.csv(morph_lmm_results, "CRISPR_screen_morphology_LMM_results.csv", row.names = FALSE)
+
+cat("Statistical approach: LMM with batch correction for all measures\n")
+cat("Model: value ~ genotype + (1|experiment)\n")
+cat("Morphology model: log(Feret) ~ log(AreaSum) + genotype + (1|experiment)\n\n")
+cat("Results exported:\n")
+cat("- CRISPR_screen_all_measures_statistics.csv\n")
+cat("- CRISPR_screen_morphology_LMM_results.csv\n")
+cat("\nForest plots saved as SVG and PNG (3\" x 10\"):\n")
+cat("- forest_plot_SL.svg/png\n")
+cat("- forest_plot_norm_adiposity.svg/png\n")
+cat("- forest_plot_morphology_effect.svg/png\n")
+cat("- forest_plot_droplet_count.svg/png\n")
+cat("- forest_plot_droplet_area.svg/png\n")
+cat("\nScatter plot saved as SVG and PNG (8\" x 6.5\"):\n")
+cat("- depot_vs_morphology_scatter.svg/png\n")
+```
+
+---
+
+# Session Info
+
+```{r session-info}
+sessionInfo()
+```
+
+---
+
+*Analysis completed: `r Sys.time()`*
